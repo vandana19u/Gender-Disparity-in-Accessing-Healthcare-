@@ -1,0 +1,4262 @@
+---
+title: "Gender-Bias Nephrology Project"
+format: 
+  html:
+    self-contained: true
+---
+
+```{r}
+#install these packages if not there. 
+#install.packages(c("rlang", "lifecycle", "magrittr", "readr", "dplyr", "stringr", "tidyverse"))
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(readr)
+library(geosphere)
+
+# Step 1: Load visit and centroid data
+visit_data <- read_csv("/home/vandana/gender-bias/FINAL_patient_visit_location_datav2.csv")
+district_centroids <- read_csv("/home/vandana/gender-bias/district_wise_centroids.csv")
+
+# Step 2: Filter for nephrology and match_method == po_ps_city_state
+nephro_po_ps_data <- visit_data %>%
+  filter(
+    str_to_lower(dept_name) == "nephrology",
+    str_to_lower(match_method) == "po_ps_city_state"
+  )
+
+# Step 3: Clean and standardize district/state names in centroids
+district_centroids_clean <- district_centroids %>%
+  rename(final_district = District, final_state = State) %>%
+  mutate(
+    final_district = str_to_title(str_trim(final_district)),
+    final_state = str_to_title(str_trim(final_state))
+  )
+
+# Step 4: Clean and standardize district/state names in nephrology data
+nephro_clean <- nephro_po_ps_data %>%
+  mutate(
+    final_state = str_to_title(str_trim(final_state)),
+    final_district = str_to_title(str_trim(final_district)),
+    final_district = case_when(
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "ambedkar nagar"      ~ "Ambedkar Nagar",
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "barabanki"           ~ "Bara Banki",
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "bareilly"            ~ "Bareilly",
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "chandauli"           ~ "Chandauli",
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "gautam buddha nagar" ~ "Gautam Buddha Nagar",
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "kanpur nagar"        ~ "Kanpur",
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "kanshiram nagar"     ~ "Kansganj",
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "kheri"               ~ "Lakhimpur Kheri",
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "lakhimpur"           ~ "Lakhimpur Kheri",
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "mahamaya nagar"      ~ "Hathras",
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "maharajganj"         ~ "Maharajganj",
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "pratapgarh"          ~ "Pratapgarh",
+      final_state == "Uttar Pradesh" & str_to_lower(final_district) == "siddharthnagar"      ~ "Siddharth Nagar",
+      TRUE ~ final_district
+    )
+  )
+
+# Step 5: Join with centroids
+nephro_with_coords <- nephro_clean %>%
+  left_join(district_centroids_clean, by = c("final_state", "final_district"))
+
+# Step 6: Filter rows with valid coordinates
+nephro_coords_clean <- nephro_with_coords %>%
+  filter(!is.na(Latitude) & !is.na(Longitude))
+
+# Step 7: Define Lucknow coordinates
+lucknow_coords <- c(lon = 80.89706026871404, lat = 26.838233589251466)
+
+# Step 8: Compute Haversine distance from Lucknow
+location_table_with_distance <- nephro_coords_clean %>%
+  rowwise() %>%
+  mutate(
+    Distance_km = distHaversine(lucknow_coords, c_across(c(Longitude, Latitude))) / 1000
+  ) %>%
+  ungroup() %>%
+  mutate(Distance_km = round(Distance_km, 2))
+
+# Step 9: Filter unknown genders, years 2010–2020, and summarize
+nephro_summary_with_distance <- location_table_with_distance %>%
+  mutate(p_gender = str_to_lower(str_trim(p_gender))) %>%
+  filter(
+    p_gender %in% c("male", "female"),
+    v_year >= 2010 & v_year <= 2020
+  ) %>%
+  group_by(final_state, final_district, v_type, v_year, Distance_km) %>%
+  summarise(
+    male              = sum(p_gender == "male", na.rm = TRUE),
+    female            = sum(p_gender == "female", na.rm = TRUE),
+    total_male_female = male + female,
+    .groups = "drop"
+  ) %>%
+  arrange(final_state, final_district, v_type, v_year, Distance_km)
+
+
+# Step 10: Save final summarized output
+write.csv(nephro_summary_with_distance, "/home/vandana/gender-bias/nephro_summary_with_distance.csv", row.names = FALSE)
+
+```
+
+```{r female-visits-plot, fig.cap = "1_overall-gender-composition-2010-2020"}
+# Overall Gender Composition, 2010‑2020 only
+
+library(dplyr)
+library(readr)
+library(tidyr)
+library(ggplot2)
+
+# Step 1: Load the data first
+nephro_data <- read_csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+# Step 2: Process it
+gender_totals <- nephro_data %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%     # restrict to 2010‑2020
+  summarise(
+    female = sum(female, na.rm = TRUE),
+    male   = sum(male,   na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = everything(),
+               names_to  = "Gender",
+               values_to = "Count")
+
+ggplot(gender_totals, aes(x = "", y = Count, fill = Gender)) +
+  geom_col(width = 1) +
+  coord_polar(theta = "y") +
+  labs(title = "Overall Gender Composition (2010–2020) for Nephrology") +
+  theme_void(base_size = 10) +
+  scale_fill_manual(values = c("female" = "#E69F00", "male" = "#56B4E9")) +
+  geom_text(aes(label = paste0(Gender, ": ",
+                               round(100 * Count / sum(Count), 1), "%")),
+            position = position_stack(vjust = 0.5),
+            color = "white", size = 5)
+
+```
+
+```{r patient count, fig.cap = "2_total_patient_contribution_by_top_80-2010-2020"}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(stringr)
+library(ggsci)
+
+# Step 1: Load data
+nephro_data <- read_csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+# Step 2: Filter for years and clean district names
+nephro_data <- nephro_data %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district)))
+
+# Step 3: Calculate total patients
+total_patients <- sum(nephro_data$total_male_female, na.rm = TRUE)
+
+# Step 4: Calculate district contribution
+district_contribution <- nephro_data %>%
+  group_by(final_district) %>%
+  summarise(patients = sum(total_male_female, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(patients)) %>%
+  mutate(
+    percent = round(100 * patients / total_patients, 2),
+    cum_percent = cumsum(patients) / total_patients
+  )
+
+# Step 5: Get districts contributing up to 80%
+top_80_districts <- district_contribution %>%
+  filter(cum_percent <= 0.80)
+
+# Step 6: Plot
+ggplot(top_80_districts, aes(x = reorder(final_district, -percent), y = percent)) +
+  geom_bar(stat = "identity", fill = pal_aaas()(1), width = 0.7) +
+  geom_text(aes(label = paste0(percent, "%")), vjust = -0.3, size = 2.8) +
+  labs(
+    title = "Districts Contributing to 80% of Patients (2010–2020) – Nephrology",
+    x = "District (ordered by contribution)",
+    y = "% of Total Patients (Male + Female)"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+```{r patient_count, fig.cap= "3_patient_count_without_lucknow"}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(stringr)
+library(ggsci)
+
+# Step 1: Load data
+nephro_data <- read_csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+# Step 2: Filter for years and clean district names
+nephro_data <- nephro_data %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district)))
+
+# Step 3: Calculate total patients
+total_patients <- sum(nephro_data$total_male_female, na.rm = TRUE)
+
+# Step 4: Calculate district contribution
+district_contribution <- nephro_data %>%
+  group_by(final_district) %>%
+  summarise(
+    patients = sum(total_male_female, na.rm = TRUE),
+    Distance_km = mean(Distance_km, na.rm = TRUE),  # bring distance info in
+    .groups = "drop"
+  ) %>%
+  arrange(desc(patients)) %>%
+  mutate(
+    percent = round(100 * patients / total_patients, 2),
+    cum_percent = cumsum(patients) / total_patients
+  )
+
+# Step 5: Save Lucknow data and remove from dataset
+lucknow_count <- district_contribution %>%
+  filter(final_district == "Lucknow") %>%
+  pull(patients)
+
+district_contribution <- district_contribution %>%
+  filter(final_district != "Lucknow")
+
+# Step 6: Get districts contributing up to 80%
+top_80_districts <- district_contribution %>%
+  filter(cum_percent <= 0.80)
+
+# Step 7: Plot, ordered by distance
+ggplot(top_80_districts, aes(x = reorder(final_district, Distance_km), y = percent)) +
+  geom_bar(stat = "identity", fill = pal_aaas()(1), width = 0.7) +
+  geom_text(aes(label = paste0("N=", patients)), vjust = -0.8, size = 2.7) +
+  labs(
+    title = "Districts Contributing to 80% of Patients (2010–2020) – Nephrology",
+    x = "District (ordered by Distance from Lucknow)",
+    y = "% of Total Patients (Male + Female)",
+    caption = paste0("Lucknow (excluded) had N = ", format(lucknow_count, big.mark = ","))
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r nephro_female_dist, fig.cap= "4_districts-80-percent-2010-2020_nephrology_female"}
+
+
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(stringr)
+
+# Step 1: Load the data
+district_data <- read_csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+# Step 2: Filter to 2010–2020 window and clean district names
+district_2010_20 <- district_data %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district)))
+
+# Step 3: Total patients (all genders)
+total_patients_2010_20 <- sum(district_2010_20$total_male_female, na.rm = TRUE)
+
+# Step 4: Identify top 80% districts by total patients
+district_contribution <- district_2010_20 %>%
+  group_by(final_district) %>%
+  summarise(patients = sum(total_male_female, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(patients)) %>%
+  mutate(
+    cum_percent = cumsum(patients) / total_patients_2010_20
+  )
+
+top_80_districts <- district_contribution %>%
+  filter(cum_percent <= 0.80)
+
+# Step 5: Female contribution from top 80% districts
+female_contribution <- district_2010_20 %>%
+  filter(final_district %in% top_80_districts$final_district) %>%
+  group_by(final_district) %>%
+  summarise(female_patients = sum(female, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    percent = round(100 * female_patients / total_patients_2010_20, 2)
+  ) %>%
+  arrange(desc(percent))
+
+# Step 6: Plot
+ggplot(female_contribution,
+       aes(x = reorder(final_district, -percent), y = percent)) +
+  geom_bar(stat = "identity", fill = "darkblue", width = 0.7) +
+  geom_text(aes(label = paste0(percent, "%")), vjust = -0.2, size = 2.5) +
+  labs(
+    title = "Female Contribution from Top 80% Districts (2010–2020) – Nephrology",
+    x     = "District (ordered by % contribution)",
+    y     = "Female Patients as % of All 2010‑2020 Visits"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r stacked_graph_gender, fig.cap= "5_stacked_gender_plot"}
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(ggsci)
+library(tidyr)
+
+district_data <- read.csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv") %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district)))
+
+# STEP 2: Get total patients
+total_patients <- sum(district_data$total_male_female, na.rm = TRUE)
+
+# STEP 3: Calculate total patient contribution by district
+district_contribution <- district_data %>%
+  group_by(final_district) %>%
+  summarise(patients = sum(total_male_female, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(patients)) %>%
+  mutate(
+    cum_percent = cumsum(patients) / total_patients
+  )
+
+# STEP 4: Select top 80% contributing districts
+top_80_districts <- district_contribution %>%
+  filter(cum_percent <= 0.80)
+
+# STEP 5: Summarise male/female/total per district + min distance
+district_visits <- district_data %>%
+  filter(final_district %in% top_80_districts$final_district) %>%
+  group_by(final_district) %>%
+  summarise(
+    female = sum(female, na.rm = TRUE),
+    male = sum(male, na.rm = TRUE),
+    total = sum(total_male_female, na.rm = TRUE),
+    Distance_km = min(Distance_km, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(final_district != "Lucknow")  # Remove Lucknow
+
+
+#creating labels
+
+district_visits <- district_visits %>%
+  mutate(
+    female_percent = round(100 * female / total_patients, 2),
+    male_percent   = round(100 * male / total_patients, 2),
+    total_percent  = round(100 * total / total_patients, 2)
+  )
+
+district_long <- district_visits %>%
+  select(final_district, Distance_km, female_percent, male_percent) %>%
+  pivot_longer(
+    cols = c(female_percent, male_percent),
+    names_to = "Gender",
+    values_to = "Percent"
+  ) %>%
+  mutate(Gender = recode(Gender,
+                         female_percent = "Female",
+                         male_percent = "Male"))
+
+# STEP 6: Calculate Lucknow's percentage
+lucknow_contribution <- district_data %>%
+  filter(final_district == "Lucknow") %>%
+  summarise(total = sum(total_male_female, na.rm = TRUE)) %>%
+  mutate(percent = round(100 * total / total_patients, 2)) %>%
+  pull(percent)
+
+# Plot
+ggplot(district_long, aes(x = reorder(final_district, Distance_km), y = Percent, fill = Gender)) +
+  geom_bar(stat = "identity", position = "stack", width = 0.7) +
+
+  # Female % inside blue bar
+  geom_text(
+    data = district_long %>% filter(Gender == "Female"),
+    aes(label = paste0(Percent, "%")),
+    position = position_stack(vjust = 2.6),
+    size = 3,
+    color = "black"
+  ) +
+
+  # Total % above each bar
+  geom_text(
+    data = district_visits,  # now has total_percent
+    aes(x = reorder(final_district, Distance_km), y = total_percent, label = paste0(total_percent, "%")),
+    vjust = -0.5,
+    size = 3.2,
+    inherit.aes = FALSE
+  ) +
+
+  labs(
+    title = "Patients (2010–2020) by Gender and District of Residence",
+    subtitle = "Female % inside blue bar, Total % above bar — Ordered by distance from Lucknow",
+    x = "District (by increasing distance from Lucknow)",
+    y = "Percent of Total Patients",
+    fill = "Gender",
+    caption = paste0("Note: Lucknow's contribution to total patients = ", lucknow_contribution, "%")
+  ) +
+  theme_minimal(base_size = 10) +
+  scale_fill_manual(values = c("Female" = "steelblue", "Male" = "#E69F00")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r nephro_visit_type, fig.cap= "6_nephrology_visit_type"}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(stringr)
+library(ggsci)
+
+# Step 1: Load data
+nephro_data <- read_csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+# Step 2: Filter for years and clean district names
+nephro_data <- nephro_data %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district)))
+
+# Step 3: Save Lucknow patient counts for caption
+lucknow_counts <- nephro_data %>%
+  filter(final_district == "Lucknow") %>%
+  group_by(v_type) %>%
+  summarise(count = sum(male + female, na.rm = TRUE), .groups = "drop")
+
+ip_lucknow <- lucknow_counts$count[lucknow_counts$v_type == "IP"]
+op_lucknow <- lucknow_counts$count[lucknow_counts$v_type == "OP"]
+
+# Step 4: Exclude Lucknow
+nephro_data <- nephro_data %>%
+  filter(final_district != "Lucknow")
+
+# Step 5: Group by year and visit type
+plot_data <- nephro_data %>%
+  group_by(v_year, v_type) %>%
+  summarise(Total = sum(male + female, na.rm = TRUE), .groups = "drop")
+
+# Step 6: Calculate total patients across all years (for percentage)
+total_all_years <- sum(plot_data$Total)
+
+# Step 7: Add percentage column
+plot_data <- plot_data %>%
+  mutate(Percentage = (Total / total_all_years) * 100)
+
+# Step 8: Plot
+ggplot(plot_data, aes(x = factor(v_year), y = Percentage, fill = v_type)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(
+    aes(label = Total),
+    position = position_stack(vjust = 0.5),
+    size = 3.5,
+    color = "white"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  scale_fill_aaas() +
+  labs(
+    title = "Nephrology Visits by Year (2010–2020)",
+    subtitle = "Visit types: IP/OP (Lucknow excluded)",
+    x = "Year",
+    y = "Percentage of Total Patients (2010–2020)",
+    fill = "Visit Type",
+    caption = paste0(
+      "Note: Lucknow excluded. IP_Lucknow = ", format(ip_lucknow, big.mark = ","), 
+      ", OP_Lucknow = ", format(op_lucknow, big.mark = ",")
+    )
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold")
+  )
+
+```
+
+
+```{r nephro_visit_gender, fig.cap= "7_nephro_visit_gender"}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(stringr)
+library(ggsci)
+
+# Step 1: Load data
+nephro_data <- read_csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+# Step 2: Filter for years and clean district names
+nephro_data <- nephro_data %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district)))
+
+# Step 3: Reshape to long format by gender
+plot_data <- nephro_data %>%
+  select(v_year, male, female) %>%
+  group_by(v_year) %>%
+  summarise(
+    male = sum(male, na.rm = TRUE),
+    female = sum(female, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_longer(cols = c(male, female), names_to = "gender", values_to = "Total")
+
+# Step 4: Calculate total patients across all years
+total_all_years <- sum(plot_data$Total)
+
+# Step 5: Add percentage column
+plot_data <- plot_data %>%
+  mutate(Percentage = (Total / total_all_years) * 100)
+
+# Step 6: Plot
+ggplot(plot_data, aes(x = factor(v_year), y = Percentage, fill = gender)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(
+    aes(label = Total),
+    position = position_stack(vjust = 0.5),
+    size = 3.5,
+    color = "white"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  scale_fill_aaas() +
+  labs(
+    title = "Nephrology Visits by Gender and Year (2010–2020)",
+    subtitle = "Includes all districts including Lucknow",
+    x = "Year",
+    y = "Percentage of Total Patients (2010–2020)",
+    fill = "Gender"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold")
+  )
+
+```
+
+```{r female_v_type, fig.cap= "8_Prevalence for Female Patients for v_type(2010–2020) Nephrology" }
+
+# Load required libraries
+library(dplyr)
+library(ggplot2)
+library(ggsci)
+library(stringr)
+
+# Read the input summary data
+nephro_summary_with_distance <- read.csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+# 1. Overall Prevalence Bar Chart (2010–2020)
+overall_data <- nephro_summary_with_distance %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  group_by(v_type) %>%
+  summarise(
+    total_female = sum(female, na.rm = TRUE),
+    total_visits = sum(total_male_female, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+#  NEW: denominator = all visits (male + female) in IP + OP together
+grand_total_visits <- sum(overall_data$total_visits)
+
+overall_data <- overall_data %>%
+  mutate(
+    percent_female = round(100 * total_female / grand_total_visits, 1),
+    label = paste0(percent_female, "%\nN=", total_visits)
+  )
+
+# Add Total row (same denominator)
+total_row <- overall_data %>%
+  summarise(
+    v_type         = "Total",
+    total_female   = sum(total_female),
+    total_visits   = grand_total_visits,
+    percent_female = round(100 * total_female / grand_total_visits, 1)
+  ) %>%
+  mutate(label = paste0(percent_female, "%\nN=", total_visits))
+
+overall_plot_data <- bind_rows(overall_data, total_row)
+
+ggplot(overall_plot_data, aes(x = v_type, y = percent_female, fill = v_type)) +
+  geom_col(width = 0.5) +
+  geom_text(aes(label = label), vjust = -0.5, size = 3.2) +
+  scale_fill_aaas() +
+  labs(
+    title = "Proportion of Female Patients (2010–2020) by Visit Type",
+    x = "Visit Type",
+    y = "% of Female Patients"
+  ) +
+  ylim(0, 100) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "none")
+
+```
+
+```{r visit_type_total_patient, fig.cap= "9_visit_type_total_patient"}
+## Load required libraries
+library(dplyr)
+library(ggplot2)
+library(ggsci)
+library(stringr)
+
+# Read the input summary data
+nephro_summary_with_distance <- read.csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+# Filter and summarize data (2010–2020)
+visit_data <- nephro_summary_with_distance %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  group_by(v_type) %>%
+  summarise(
+    total_visits = sum(total_male_female, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Calculate total and percent, and create combined label
+grand_total_visits <- sum(visit_data$total_visits)
+
+visit_data <- visit_data %>%
+  mutate(
+    percent_visits = round(100 * total_visits / grand_total_visits, 1),
+    label = paste0(percent_visits, "%\nN=", total_visits)
+  )
+
+# Plot: % of Total Visits with N label
+ggplot(visit_data, aes(x = v_type, y = percent_visits, fill = v_type)) +
+  geom_col(width = 0.5) +
+  geom_text(aes(label = label), vjust = -0.2, size = 3.2) +
+  scale_fill_aaas() +
+  labs(
+    title = "Proportion of Total Visits (2010–2020) by Visit Type",
+    x = "Visit Type",
+    y = "% of Total Visits"
+  ) +
+  ylim(0, 100) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "none")
+
+```
+
+```{r v_type_gender_per_year, fig.cap= "10_v_type_gender_per_year"}
+
+#9_Percentage of Patient Visits by Gender and Visit Type Over Years
+# Load libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggsci)
+
+# Load data
+nephro_summary_with_distance <- read.csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+# Reshape and prepare data
+plot_data <- nephro_summary_with_distance %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  filter(v_type %in% c("IP", "OP"), !is.na(v_year)) %>%
+  select(v_year, v_type, male, female) %>%
+  pivot_longer(cols = c(male, female), names_to = "Gender", values_to = "Count") %>%
+  mutate(
+    Gender = ifelse(Gender == "male", "Male", "Female"),
+    Group = paste(Gender, v_type, sep = "_")
+  )
+
+# Calculate raw counts and group by year and group
+summary_data <- plot_data %>%
+  group_by(v_year, Group) %>%
+  summarise(n = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Calculate total across all years
+total_all_years <- sum(summary_data$n)
+
+# Calculate overall % contribution across all years
+summary_data <- summary_data %>%
+  mutate(perc = round((n / total_all_years) * 100, 2))
+
+# Total patients per year
+total_by_year <- summary_data %>%
+  group_by(v_year) %>%
+  summarise(Total = sum(n), .groups = "drop")
+
+# Find the top of the stacked bar (max y per year)
+bar_top_by_year <- summary_data %>%
+  group_by(v_year) %>%
+  summarise(y_position = sum(perc), .groups = "drop")
+
+# Join the total count label with y_position info
+total_by_year_label <- left_join(total_by_year, bar_top_by_year, by = "v_year") %>%
+  mutate(y_position = y_position + 0.5)  # offset above bar
+
+# Final plot
+ggplot(summary_data, aes(x = factor(v_year), y = perc, fill = Group)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = n), position = position_stack(vjust = 0.5), size = 2.5, color = "black") +
+  geom_text(data = total_by_year_label,
+            aes(x = factor(v_year), y = y_position, label = paste0("N=", Total)),
+            size = 3.2, inherit.aes = FALSE) +
+  scale_fill_manual(
+    values = c(
+      "Female_IP" = "#4E79A7",
+      "Male_IP" = "orange",
+      "Female_OP" = "darkgreen",
+      "Male_OP" = "red"
+    ),
+    name = "Group"
+  ) +
+  labs(
+    title = "Proportion of Patients by Year (2010-2020) and by Visit Type",
+    x = "Year",
+    y = "Percentage of Patients (Relative to Total 2010–2020)"
+  ) +
+  ylim(0, 17) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "top"
+  )
+
+```
+
+```{r  v_type_gender_per_dist, fig.cap= "11_v_type_gender_per_dist"}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(ggsci)
+library(tidyr)
+
+# Load and clean data
+district_data <- read.csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv") %>%
+  filter(v_year >= 2010 & v_year <= 2020, v_type %in% c("IP", "OP")) %>%
+  mutate(final_district = str_to_title(str_trim(final_district)))
+
+# Total patient count
+total_patients <- sum(district_data$total_male_female, na.rm = TRUE)
+
+# Get top 80% districts
+district_contribution <- district_data %>%
+  group_by(final_district) %>%
+  summarise(patients = sum(total_male_female, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(patients)) %>%
+  mutate(cum_percent = cumsum(patients) / total_patients)
+
+top_80_districts <- district_contribution %>%
+  filter(cum_percent <= 0.80)
+
+# Summarise gender-wise + IP/OP per district
+district_visits <- district_data %>%
+  filter(final_district %in% top_80_districts$final_district, final_district != "Lucknow") %>%
+  group_by(final_district, v_type) %>%
+  summarise(
+    female = sum(female, na.rm = TRUE),
+    male = sum(male, na.rm = TRUE),
+    total = sum(total_male_female, na.rm = TRUE),
+    Distance_km = min(Distance_km, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    female_percent = round(100 * female / total_patients, 2),
+    male_percent = round(100 * male / total_patients, 2),
+    total_percent = round(100 * total / total_patients, 2)
+  )
+
+# Reshape for plotting
+district_long <- district_visits %>%
+  pivot_longer(cols = c(female_percent, male_percent),
+               names_to = "Gender", values_to = "Percent") %>%
+  mutate(
+    Gender = recode(Gender, female_percent = "Female", male_percent = "Male"),
+    Group = paste(Gender, v_type, sep = "_")
+  )
+
+# Lucknow's contribution
+lucknow_contribution <- district_data %>%
+  filter(final_district == "Lucknow") %>%
+  summarise(total = sum(total_male_female, na.rm = TRUE)) %>%
+  mutate(percent = round(100 * total / total_patients, 2)) %>%
+  pull(percent)
+
+# Compute total percent per district (for positioning label)
+total_bar_heights <- district_long %>%
+  group_by(final_district) %>%
+  summarise(total_perc = sum(Percent), .groups = "drop")
+
+# Merge with Female_IP summary
+summary_data <- district_long %>%
+  filter(Group == "Female_IP") %>%
+  group_by(final_district, v_type, Group) %>%
+  summarise(perc = sum(Percent), .groups = "drop") %>%
+  left_join(total_bar_heights, by = "final_district")
+
+# Plot
+ggplot(district_long, aes(x = reorder(final_district, Distance_km), y = Percent, fill = Group)) +
+  geom_bar(stat = "identity", position = "stack", width = 0.7) +
+
+  # Add Female_IP % at top of bar
+  geom_text(data = summary_data,
+            aes(x = final_district, y = total_perc + 1, label = paste0(perc, "%")),
+            color = "black", size = 2.8, fontface = "bold", vjust = 4, inherit.aes = FALSE) +
+
+  scale_fill_manual(
+    values = c(
+      "Female_IP" = "#4E79A7",
+      "Male_IP" = "orange",
+      "Female_OP" = "darkgreen",
+      "Male_OP" = "red"
+    ),
+    name = "Group"
+  ) +
+  labs(
+    title = "Patients (2010–2020) by Gender and Visit Type across Districts",
+    subtitle = "Female % on top of bar, Lucknow hidden in the plot",
+    x = "District (ordered by distance from Lucknow)",
+    y = "Percent of Total Patients (2010–2020)",
+    caption = paste0("Note: Lucknow's contribution to total patients = ", lucknow_contribution, "%")
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    legend.position = "top",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+```{r lineplot_year_district, fig.cap= "12_lineplot_year_district"}
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(ggsci)
+
+# Read updated dataset
+nephro_summary_with_distance <- read.csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+
+# 1. Clean and prepare data
+clean_data <- nephro_summary_with_distance %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district)))
+
+# 2. Get top 80% contributing districts (based on ALL patients, including Lucknow)
+top_80_districts <- clean_data %>%
+  group_by(final_district) %>%
+  summarise(total_patients = sum(total_male_female, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(total_patients)) %>%
+  mutate(cum_percent = cumsum(total_patients) / sum(total_patients, na.rm = TRUE)) %>%
+  filter(cum_percent <= 0.80) %>%
+  pull(final_district)
+
+# 3. Get min distance per district
+district_distances <- clean_data %>%
+  filter(final_district %in% top_80_districts) %>%
+  group_by(final_district) %>%
+  summarise(Distance_km = min(Distance_km, na.rm = TRUE), .groups = "drop")
+
+# 4. Get female patient count per district per year (only top 80%)
+district_year_female <- clean_data %>%
+  filter(final_district %in% top_80_districts) %>%
+  group_by(v_year, final_district) %>%
+  summarise(female = sum(female, na.rm = TRUE), .groups = "drop")
+
+# 5. Total female across ALL districts (including Lucknow)
+total_female_all <- clean_data %>%
+  summarise(total = sum(female, na.rm = TRUE)) %>%
+  pull(total)
+
+# 6. Add percent + join distance
+district_year_female <- district_year_female %>%
+  mutate(percent = round(100 * female / total_female_all, 2)) %>%
+  left_join(district_distances, by = "final_district")
+
+# 7. Remove Lucknow **only from plot**
+plot_data <- district_year_female %>%
+  filter(final_district != "Lucknow")
+
+#plot
+ggplot(plot_data, aes(x = reorder(final_district, Distance_km), y = percent, group = v_year, color = factor(v_year))) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.7) +
+  geom_text(aes(label = female), vjust = -0.5, size = 2.5) +
+  scale_color_viridis_d(option = "D") +
+  labs(
+    title = "Proportion of Female Patients by Year (2010–2020) and by District",
+    subtitle = "Top Districts(Lucknow Hidden) contributing 80% of the patient and their female patient count year wise",
+    x = "District (ordered by distance from Lucknow)",
+    y = "Percentage of Female out of Total Patient ",
+    color = "Year"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+```
+
+
+```{r normalized_plot, fig.cap= "13_normalized_nephrology_p_visits_for_2011_District_Population"}
+
+# ── Libraries ────────────────────────────────────────────────────────────────
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(readr)
+
+# ── 1. Load data ─────────────────────────────────────────────────────────────
+census_2011 <- read_csv("/home/vandana/gender-bias/india-districts-census-2011.csv")
+nephro_raw  <- read.csv ("/home/vandana/gender-bias/nephro_summary_with_distance.csv")   # your pre‑prepared summary
+
+# ── 2. Clean & filter nephrology records (2010‑2020) ─────────────────────────
+nephro_clean <- nephro_raw %>%
+  filter(dplyr::between(v_year, 2010, 2020)) %>%
+  mutate(
+    final_district = str_to_lower(str_trim(final_district)),
+    final_state    = str_to_lower(str_trim(final_state)),
+    
+    # Fix name mismatch for proper join with census
+    final_district = if_else(final_district == "kanpur", "kanpur nagar", final_district)
+  ) %>%
+  filter(!(final_district == "pratapgarh" & final_state != "uttar pradesh"))
+
+
+# ── 3. Summarise visits per district ─────────────────────────────────────────
+district_visits <- nephro_clean %>%
+  group_by(final_district) %>%
+  summarise(
+    Distance_km  = min(Distance_km, na.rm = TRUE),          # one distance / district
+    total_visits = sum(total_male_female, na.rm = TRUE),
+    .groups      = "drop"
+  )
+
+# ── 4. Keep districts accounting for the first 80 % of visits ────────────────
+top_districts <- district_visits %>%
+  arrange(desc(total_visits)) %>%
+  mutate(cum_pct = cumsum(total_visits) / sum(total_visits)) %>%
+  filter(cum_pct <= 0.8)
+
+# ── 5. Prepare 2011 census population data ───────────────────────────────────
+census_clean <- census_2011 %>%
+  mutate(`District name` = str_to_lower(str_trim(`District name`))) %>%
+  select(final_district = `District name`, Population)
+
+# ── 6. Join visits with population ───────────────────────────────────────────
+top_with_pop <- top_districts %>%
+  left_join(census_clean, by = "final_district") %>%
+  filter(!is.na(Population))         # drop districts missing pop data if any
+
+# (optional alias, if you still want the old name)
+# top_90_with_pop <- top_with_pop
+
+# ── 7. Compute % of population and plot ──────────────────────────────────────
+df_norm <- top_with_pop %>%
+  mutate(patient_percent = 100 * total_visits / Population) %>%
+  arrange(Distance_km) %>%
+  distinct(final_district, .keep_all = TRUE) %>%            # ensure no dups
+  mutate(final_district = factor(final_district,
+                                 levels = unique(final_district)))
+
+ggplot(df_norm,
+       aes(x = final_district, y = patient_percent)) +
+  geom_col(fill = "#2E6F40") +
+  geom_text(aes(label = sprintf("%.1f%%", patient_percent)),
+            vjust = -0.3, size = 2.5) +
+  scale_x_discrete(labels = str_to_title) +
+  labs(
+    title    = "Patient Visit-District Population Normalized Graph",
+    x        = "District (ordered by distance from Lucknow)",
+    y        = "Patients (2010-20) / Population(2011 census) (%)"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r normalized_plot_unique_patient, fig.cap= "14_normalized_plot_unique_patient"}
+
+# 1 ── Load data --------------------------------------------------------------
+census_2011 <- read_csv("/home/vandana/gender-bias/india-districts-census-2011.csv")
+visits_raw  <- read_csv("/home/vandana/gender-bias/nephrology_po_ps_with_coordinates_clean.csv")
+
+# 2 ── Clean & filter raw records (2010–2020) ---------------------------------
+nephro_clean <- visits_raw %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(
+    final_district = str_to_lower(str_trim(final_district)),
+    final_state    = str_to_lower(str_trim(final_state)),
+    final_district = if_else(final_district == "kanpur", "kanpur nagar", final_district)  # Fix Kanpur naming
+  ) %>%
+  filter(!(final_district == "pratapgarh" & final_state != "uttar pradesh"))  # remove Rajasthan's Pratapgarh
+
+# 3 ── Unique patient count per district --------------------------------------
+district_patients <- nephro_clean %>%
+  group_by(final_district) %>%
+  summarise(
+    unique_patients = n_distinct(p_id),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(unique_patients)) %>%
+  mutate(cum_pct = cumsum(unique_patients) / sum(unique_patients))
+
+# 4 ── Retain top 80% districts -----------------------------------------------
+top_80 <- district_patients %>%
+  filter(cum_pct <= 0.8)
+
+# 5 ── Join with Census 2011 population ---------------------------------------
+census_clean <- census_2011 %>%
+  mutate(
+    `District name` = str_to_lower(str_trim(`District name`)),
+    `State name`    = str_to_lower(str_trim(`State name`)),
+    `District name` = if_else(`District name` == "kanpur nagar", "kanpur", `District name`)  # Fix Kanpur naming
+  ) %>%
+  filter(!(`District name` == "pratapgarh" & `State name` != "uttar pradesh")) %>%  # remove Rajasthan's Pratapgarh
+  select(`District name`, Population) %>%
+  rename(final_district = `District name`)
+
+ggplot(df_norm, aes(x = reorder(final_district, Distance_km), y = patient_percent)) +
+  geom_col(fill = "#2E6F40") +
+  geom_text(aes(label = sprintf("%.2f%%", patient_percent)),
+            vjust = -0.3, size = 2.5) +
+  scale_x_discrete(labels = str_to_title) +
+  labs(
+    title    = "Unique Nephrology Patients-District Population Normalized",
+    subtitle = "Top 80% districts arranged by distance from Lucknow",
+    x        = "District (by Distance)",
+    y        = "Unique Patients / Population (%)"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+```{r lineplot_patient_dist, fig.cap= "15_lineplot_patient_dist"}
+
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(ggsci)
+
+# 1 Summarize data
+district_year_data <- read.csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv") %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district))) %>%
+  group_by(v_year, final_district) %>%
+  summarise(
+    n = sum(total_male_female, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2 Total N (2010-2020)
+N_total <- sum(district_year_data$n, na.rm = TRUE)
+
+# 3 Add percent
+district_year_data <- district_year_data %>%
+  mutate(percent = round(100 * n / N_total, 2))
+
+# 4 Identify top districts by cumulative contribution (include Lucknow)
+district_total <- district_year_data %>%
+  group_by(final_district) %>%
+  summarise(total_patients = sum(n), .groups = "drop") %>%
+  arrange(desc(total_patients)) %>%
+  mutate(
+    cum_percent = cumsum(total_patients) / N_total,
+    rank = row_number()
+  )
+
+# Force include Lucknow
+top_districts <- district_total %>%
+  filter(cum_percent <= 0.8 | final_district == "Lucknow") %>%
+  pull(final_district)
+
+# 5 Label non-top districts as "Other"
+district_year_data <- district_year_data %>%
+  mutate(final_district = ifelse(final_district %in% top_districts, final_district, "Other"))
+
+# 6 Merge rank for coloring
+district_year_data <- district_year_data %>%
+  left_join(district_total[, c("final_district", "rank")], by = "final_district") %>%
+  mutate(rank = ifelse(final_district == "Other", NA, rank))
+
+# 7 Create color palette based on rank
+palette <- scales::viridis_pal(option = "D")(length(unique(na.omit(district_year_data$rank))))
+names(palette) <- district_total %>%
+  filter(final_district %in% top_districts) %>%
+  arrange(rank) %>%
+  pull(final_district)
+
+# Add grey for "Other"
+palette["Other"] <- "grey80"
+
+# 8 Plot
+ggplot(district_year_data, aes(x = v_year, y = percent, color = final_district)) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 1) +
+  geom_text(aes(label = n), vjust = -0.7, size = 2.5) +
+  scale_color_manual(values = palette) +
+  labs(
+    title = "% of Patients by District and Year (2010–2020)",
+    subtitle = paste("N =", N_total),
+    x = "Year",
+    y = "% of Total Patients per district",
+    color = "District"
+  ) +
+  scale_x_continuous(breaks = seq(2010, 2020, 1)) +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "right"
+  )
+
+
+```
+
+```{r lineplot_dist_year_lucknow_hidden, fig.cap= "16_lineplot_dist_year_lucknow_hidden"}
+
+#12_Line plot for Patients by District and Year (2010–2020) Nephrology(excluding Lucknow)
+
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(ggsci)
+
+# 1 Summarize data
+district_year_data <- district_year_data <- read.csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv") %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district))) %>%
+  group_by(v_year, final_district) %>%
+  summarise(
+    n = sum(total_male_female, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+#  Total N (2010-2020)
+N_total <- sum(district_year_data$n, na.rm = TRUE)
+
+#  Add percent
+district_year_data <- district_year_data %>%
+  mutate(percent = round(100 * n / N_total, 2))
+
+#  Identify top K districts contributing 80% cumulatively
+district_total <- district_year_data %>%
+  group_by(final_district) %>%
+  summarise(total_patients = sum(n), .groups = "drop") %>%
+  arrange(desc(total_patients)) %>%
+  mutate(cum_percent = cumsum(total_patients) / N_total)
+
+top_districts <- district_total %>%
+  filter(cum_percent <= 0.8) %>%
+  pull(final_district)
+
+#  Label remaining as "Other"
+district_year_data <- district_year_data %>%
+  mutate(final_district = ifelse(final_district %in% top_districts, final_district, "Other"))
+
+# Remove Lucknow from plot data only
+plot_data <- district_year_data %>%
+  filter(final_district != "Lucknow")
+
+# Plot
+ggplot(plot_data, aes(x = v_year, y = percent, color = final_district)) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 1) +
+  geom_text(aes(label = n), vjust = -0.7, size = 2.5) +
+  scale_color_lancet() +
+  labs(
+    title = "% of Patients by District and Year (2010–2020, Lucknow Hidden in Plot)",
+    subtitle = paste("N =", N_total),
+    x = "Year",
+    y = "% of Total Patients",
+    color = "District"
+  ) +
+  scale_x_continuous(breaks = seq(2010, 2020, 1)) +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "right"
+  )
+
+```
+
+
+
+```{r lineplot_dist_year_female, fig.cap= "17_lineplot_dist_year_female"}
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(ggsci)
+
+# ── STEP 1: Summarize female patient data by year and district ────────────────────────
+district_year_data <- nephro_summary_with_distance %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district))) %>%
+  group_by(v_year, final_district) %>%
+  summarise(
+    female_patients = sum(female, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ── STEP 2: Total patients 2010–2020 ────────────────────────
+total_patients <- nephro_summary_with_distance %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  summarise(total_patients = sum(total_male_female, na.rm = TRUE)) %>%
+  pull(total_patients)
+
+# ── STEP 3: Compute % contribution ────────────────────────
+district_year_data <- district_year_data %>%
+  mutate(percent = round(100 * female_patients / total_patients, 2))
+
+# ── STEP 4: Rank districts based on total contribution ────────────────────────
+district_total <- nephro_summary_with_distance %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district))) %>%
+  group_by(final_district) %>%
+  summarise(total_patients_district = sum(total_male_female, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(total_patients_district)) %>%
+  mutate(cum_percent = cumsum(total_patients_district) / sum(total_patients_district))
+
+# Identify top contributors up to 80% cumulatively
+top_districts <- district_total %>%
+  filter(cum_percent <= 0.8) %>%
+  pull(final_district)
+
+# Assign ranks
+district_total <- district_total %>%
+  mutate(rank = rank(-total_patients_district, ties.method = "first"))
+
+# Keep only top districts and assign factor levels based on rank
+district_year_data <- district_year_data %>%
+  mutate(final_district = ifelse(final_district %in% top_districts, final_district, "Other")) %>%
+  left_join(district_total %>% select(final_district, rank), by = "final_district") %>%
+  mutate(rank = ifelse(is.na(rank), max(district_total$rank) + 1, rank)) %>%
+  mutate(final_district = reorder(final_district, rank))
+
+# ── STEP 5: Plot ────────────────────────
+ggplot(district_year_data, aes(x = v_year, y = percent, color = final_district, group = final_district)) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 1) +
+  geom_text(aes(label = female_patients), vjust = -0.7, size = 2.5) +
+  scale_color_manual(values = ggsci::pal_lancet()(length(unique(district_year_data$final_district)))) +
+  labs(
+    title = "Female % of Total Patients by District and Year (2010–2020) Nephrology",
+    subtitle = paste("Total N =", total_patients),
+    x = "Year",
+    y = "Female % of Total Patients (2010–2020)",
+    color = "District"
+  ) +
+  scale_x_continuous(breaks = seq(2010, 2020, 1)) +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "right"
+  )
+
+```
+
+
+
+
+```{r lineplot_dist_year_female_lucknow_hidden, fig.cap= "18_lineplot_dist_year_female_Lucknow_hidden"}
+
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(ggsci)
+
+# 1 Summarize data
+district_year_data <- nephro_summary_with_distance %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district))) %>%
+  group_by(v_year, final_district) %>%
+  summarise(
+    n = sum(total_male_female, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2 Total N (2010-2020)
+N_total <- sum(district_year_data$n, na.rm = TRUE)
+
+# 3 Add percent (as % of total across all years)
+district_year_data <- district_year_data %>%
+  mutate(percent = round(100 * n / N_total, 2))
+
+# 4 Identify top K districts contributing 80% cumulatively (across all years)
+district_total <- district_year_data %>%
+  group_by(final_district) %>%
+  summarise(total_patients = sum(n), .groups = "drop") %>%
+  arrange(desc(total_patients)) %>%
+  mutate(cum_percent = cumsum(total_patients) / N_total)
+
+top_districts <- district_total %>%
+  filter(cum_percent <= 0.8) %>%
+  pull(final_district)
+
+# 5 Label remaining as "Other"
+district_year_data <- district_year_data %>%
+  mutate(final_district = ifelse(final_district %in% top_districts, final_district, "Other"))
+
+#  Remove Lucknow from plot only
+plot_data <- district_year_data %>%
+  filter(final_district != "Lucknow")
+
+# 6 Plot
+ggplot(plot_data, aes(x = v_year, y = percent, color = final_district)) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 1) +
+  geom_text(aes(label = n), vjust = -0.7, size = 2.5) +
+  scale_color_lancet() +
+  labs(
+    title = "Female % by District and Year (2010–2020, Lucknow Hidden in Plot) Nephrology",
+    subtitle = paste("N =", N_total),
+    x = "Year",
+    y = "female % of Total Patients (2010–2020)",
+    color = "District"
+  ) +
+  scale_x_continuous(breaks = seq(2010, 2020, 1)) +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "right"
+  )
+
+```
+
+
+Distance correlation__________________Edit
+```{r}
+# 15_Patient_Distance_from_Lucknow_Nephroloyg_Pearson_coor
+
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(stringr)
+library(geosphere)  # optional, if you want to recompute distance
+
+# Load data
+nephro_data <- read_csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+
+# Step 1: Filter and sort for top 90% contributing districts
+top_90_data <- nephro_data %>%
+  filter(!is.na(Distance_km)) %>%
+  group_by(final_district) %>%
+  summarise(
+    total = sum(total_male_female, na.rm = TRUE),
+    Distance_km = mean(Distance_km, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total)) %>%
+  mutate(
+    cum_sum = cumsum(total),
+    total_all = sum(total),
+    cum_percent = cum_sum / total_all
+  ) %>%
+  filter(cum_percent <= 0.90)
+
+# -----------------------------
+library(ggplot2)
+library(dplyr)
+library(stringr)
+
+# ----------- Plot 1: Including Lucknow -----------
+
+plot_data_inc <- top_90_data
+N_inc <- sum(plot_data_inc$total, na.rm = TRUE)
+
+plot_data_inc <- plot_data_inc %>%
+  mutate(
+    percent = round(100 * total / N_inc, 2),
+    abbr = tolower(str_sub(final_district, 1, 3))
+  )
+
+# Compute Pearson correlation (including Lucknow)
+cor_val_inc <- cor(plot_data_inc$Distance_km, plot_data_inc$percent, use = "complete.obs")
+cor_label_inc <- paste0("Pearson r = ", round(cor_val_inc, 2))
+
+ggplot(plot_data_inc, aes(x = Distance_km, y = percent)) +
+  geom_point(color = "#004D4D", size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "#9AD8D8", linetype = "dotted", linewidth = 0.5) +
+  annotate("text", x = Inf, y = Inf, label = cor_label_inc, hjust = 1.1, vjust = 2, size = 4) +
+  labs(
+    title = "Patient % vs Distance from Lucknow (Top 90% Districts, Including Lucknow)",
+    x = "Distance from Lucknow (km)",
+    y = "Patient %"
+  ) +
+  theme_minimal(base_size = 10)
+
+# ----------- Plot 2: Excluding Lucknow -----------
+# Remove Lucknow from plot ONLY (do not recalculate %)
+plot_data_exc <- plot_data_inc %>% 
+  filter(final_district != "Lucknow")  # keep original percent values
+
+# Pearson correlation on original % (excluding Lucknow)
+cor_val_exc <- cor(plot_data_exc$Distance_km, plot_data_exc$percent, use = "complete.obs")
+cor_label_exc <- paste0("Pearson r = ", round(cor_val_exc, 2))
+
+# Plot (without Lucknow, but using original percent)
+ggplot(plot_data_exc, aes(x = Distance_km, y = percent)) +
+  geom_point(color = "#004D4D", size = 1.5) +
+  geom_text(aes(label = abbr), vjust = -0.7, size = 3) +
+  geom_smooth(method = "lm", se = TRUE, color = "#9AD8D8", linetype = "dotted", linewidth = 0.5) +
+  annotate("text", x = Inf, y = Inf, label = cor_label_exc, hjust = 1.1, vjust = 2, size = 4) +
+  labs(
+    title = "Patient % vs Distance from Lucknow (Top 90% Districts, Excluding Lucknow)",
+    x = "Distance from Lucknow (km)",
+    y = "Patient %"
+  ) +
+  theme_minimal(base_size = 10)
+
+```
+
+```{r}
+# 15_Female_Patient_Distance_from_Lucknow_Nephrology_Pearson_coor
+
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(stringr)
+library(geosphere)  # optional
+
+# Load data
+nephro_data <- read_csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+# Step 1: Filter and sort for top 90% contributing districts (based on female count)
+top_80_data <- nephro_data %>%
+  filter(!is.na(Distance_km)) %>%
+  group_by(final_district) %>%
+  summarise(
+    female = sum(female, na.rm = TRUE),
+    total_male_female = sum(total_male_female, na.rm = TRUE),
+    Distance_km = mean(Distance_km, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(female)) %>%
+  mutate(
+    cum_sum = cumsum(female),
+    total_all = sum(total_male_female),
+    cum_percent = cum_sum / total_all
+  ) %>%
+  filter(cum_percent <= 0.80)
+
+# ----------- Plot 1: Including Lucknow -----------
+
+plot_data_inc <- top_80_data %>%
+  mutate(
+    percent = round(100 * female / sum(total_male_female, na.rm = TRUE), 2),
+    abbr = tolower(str_sub(final_district, 1, 3))
+  )
+
+# Pearson correlation (including Lucknow)
+cor_val_inc <- cor(plot_data_inc$Distance_km, plot_data_inc$percent, use = "complete.obs")
+cor_label_inc <- paste0("Pearson r = ", round(cor_val_inc, 2))
+
+ggplot(plot_data_inc, aes(x = Distance_km, y = percent)) +
+  geom_point(color = "#004D4D", size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "#9AD8D8", linetype = "dotted", linewidth = 0.5) +
+  annotate("text", x = Inf, y = Inf, label = cor_label_inc, hjust = 1.1, vjust = 2, size = 4) +
+  labs(
+    title = "Female Patient % vs Distance from Lucknow (Top 90% Districts, Including Lucknow)",
+    x = "Distance from Lucknow (km)",
+    y = "Female Patient %"
+  ) +
+  theme_minimal(base_size = 10)
+
+# ----------- Plot 2: Excluding Lucknow -----------
+
+plot_data_exc <- plot_data_inc %>%
+  filter(final_district != "Lucknow")  # Keep original percent values
+
+# Pearson correlation (excluding Lucknow)
+cor_val_exc <- cor(plot_data_exc$Distance_km, plot_data_exc$percent, use = "complete.obs")
+cor_label_exc <- paste0("Pearson r = ", round(cor_val_exc, 2))
+
+ggplot(plot_data_exc, aes(x = Distance_km, y = percent)) +
+  geom_point(color = "#004D4D", size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "#9AD8D8", linetype = "dotted", linewidth = 0.5) +
+  annotate("text", x = Inf, y = Inf, label = cor_label_exc, hjust = 1.1, vjust = 2, size = 4) +
+  labs(
+    title = "Female Patient % vs Distance from Lucknow (Top 90% Districts, Excluding Lucknow)",
+    x = "Distance from Lucknow (km)",
+    y = "Female Patient %"
+  ) +
+  theme_minimal(base_size = 10)
+
+```
+
+```{r}
+# 15_Female_Patient_Distance_from_Lucknow_Nephrology_Pearson_coor
+
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(stringr)
+library(geosphere)  # optional
+
+# Load data
+nephro_data <- read_csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv")
+
+# Step 1: Filter and sort for top 90% contributing districts (based on female count)
+top_80_data <- nephro_data %>%
+  filter(!is.na(Distance_km)) %>%
+  group_by(final_district) %>%
+  summarise(
+    male = sum(male, na.rm = TRUE),
+    total_male_female = sum(total_male_female, na.rm = TRUE),
+    Distance_km = mean(Distance_km, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(male)) %>%
+  mutate(
+    cum_sum = cumsum(male),
+    total_all = sum(total_male_female),
+    cum_percent = cum_sum / total_all
+  ) %>%
+  filter(cum_percent <= 0.80)
+
+# ----------- Plot 1: Including Lucknow -----------
+
+plot_data_inc <- top_80_data %>%
+  mutate(
+    percent = round(100 * male / sum(total_male_female, na.rm = TRUE), 2),
+    abbr = tolower(str_sub(final_district, 1, 3))
+  )
+
+# Pearson correlation (including Lucknow)
+cor_val_inc <- cor(plot_data_inc$Distance_km, plot_data_inc$percent, use = "complete.obs")
+cor_label_inc <- paste0("Pearson r = ", round(cor_val_inc, 2))
+
+ggplot(plot_data_inc, aes(x = Distance_km, y = percent)) +
+  geom_point(color = "#004D4D", size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "#9AD8D8", linetype = "dotted", linewidth = 0.5) +
+  annotate("text", x = Inf, y = Inf, label = cor_label_inc, hjust = 1.1, vjust = 2, size = 4) +
+  labs(
+    title = "Male Patient % vs Distance from Lucknow (Top 90% Districts, Including Lucknow)",
+    x = "Distance from Lucknow (km)",
+    y = "Female Patient %"
+  ) +
+  theme_minimal(base_size = 10)
+
+# ----------- Plot 2: Excluding Lucknow -----------
+
+plot_data_exc <- plot_data_inc %>%
+  filter(final_district != "Lucknow")  # Keep original percent values
+
+# Pearson correlation (excluding Lucknow)
+cor_val_exc <- cor(plot_data_exc$Distance_km, plot_data_exc$percent, use = "complete.obs")
+cor_label_exc <- paste0("Pearson r = ", round(cor_val_exc, 2))
+
+ggplot(plot_data_exc, aes(x = Distance_km, y = percent)) +
+  geom_point(color = "#004D4D", size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "#9AD8D8", linetype = "dotted", linewidth = 0.5) +
+  annotate("text", x = Inf, y = Inf, label = cor_label_exc, hjust = 1.1, vjust = 2, size = 4) +
+  labs(
+    title = "Male Patient % vs Distance from Lucknow (Top 90% Districts, Excluding Lucknow)",
+    x = "Distance from Lucknow (km)",
+    y = "Female Patient %"
+  ) +
+  theme_minimal(base_size = 10)
+
+```
+
+Heatmap
+
+```{r Nephrology Patient Share by District (2010–2020) India Map, fig.cap= "heatmap India for patient visit"}
+library(sf)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+
+# 1️ Read shapefile
+india_districts <- st_read("/home/vandana/gender-bias/IND_adm2.shp")
+
+# 2️ Clean district names
+india_districts <- india_districts %>%
+  mutate(NAME_2 = str_to_title(str_trim(NAME_2)))
+
+# 3️ Summarize Nephrology data
+nephro_by_district <- nephro_summary_with_distance %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(final_district = str_to_title(str_trim(final_district)),
+         final_district = ifelse(final_district == "Kanpur Nagar", "Kanpur", final_district)) %>%
+  group_by(final_district) %>%
+  summarise(patient_count = sum(total_male_female, na.rm = TRUE), .groups = "drop")
+
+# 4️ Compute % contribution
+total_patients <- sum(nephro_by_district$patient_count, na.rm = TRUE)
+nephro_by_district <- nephro_by_district %>%
+  mutate(
+    pct = patient_count / total_patients * 100,
+    contrib_bin = case_when(
+      pct > 50                 ~ ">50%",
+      pct > 4  & pct <= 50     ~ "4–50%",
+      pct > 2  & pct <= 4      ~ "2–4%",
+      pct > 1  & pct <= 2      ~ "1–2%",
+      pct >= 0.1 & pct <= 1    ~ "0.1–1%",
+      TRUE                     ~ "<0.1%"
+    )
+  )
+
+# 5️ Join with map
+map_data <- india_districts %>%
+  left_join(nephro_by_district, by = c("NAME_2" = "final_district"))
+
+# 6️ Plot
+ggplot(map_data) +
+  geom_sf(aes(fill = contrib_bin), color = "grey80", size = 0.1) +
+  scale_fill_manual(
+    values = c(">50%" = "yellow", "4–50%" = "orange", "2–4%" = "blue", 
+               "1–2%" = "green", "0.1–1%" = "black", "<0.1%" = "grey90"),
+    na.value = "white",
+    drop = FALSE
+  ) +
+  labs(
+    title = "Nephrology Patient Share by District (2010–2020)",
+    subtitle = paste("Total patients =", total_patients),
+    fill = "District share"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+
+```
+
+
+```{r Female Nephrology Patient, fig.cap= "heatmap_for_UP_female_P_count"}
+
+
+#Heat Map: Female Patient Contribution (% of India Total)
+
+# 1️ Clean UP map
+up_map_sf <- india_districts %>%
+  mutate(
+    NAME_1 = str_to_title(str_trim(NAME_1)),
+    NAME_2 = str_to_title(str_trim(NAME_2))
+  ) %>%
+  filter(NAME_1 == "Uttar Pradesh")
+
+# 2️ Summarize female patients
+nephro_female_up <- read.csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv") %>%
+  filter(v_year >= 2010 & v_year <= 2020,
+         str_to_title(str_trim(final_state)) == "Uttar Pradesh") %>%
+  mutate(final_district = str_to_title(str_trim(final_district)),
+         final_district = ifelse(final_district == "Kanpur Nagar", "Kanpur", final_district)) %>%
+  group_by(final_district) %>%
+  summarise(female_patients = sum(female, na.rm = TRUE), .groups = "drop")
+
+# 3 Total patients India
+total_patients_india <- read.csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv") %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  summarise(total_patients = sum(total_male_female, na.rm = TRUE)) %>%
+  pull(total_patients)
+
+# 4️ Compute % & bin
+nephro_female_up <- nephro_female_up %>%
+  mutate(
+    female_pct = female_patients / total_patients_india * 100,
+    contrib_bin = case_when(
+      female_pct > 5                  ~ ">5%",
+      female_pct > 3 & female_pct <= 5 ~ "3–5%",
+      female_pct > 2 & female_pct <= 3 ~ "2–3%",
+      female_pct > 1 & female_pct <= 2 ~ "1–2%",
+      female_pct >= 0.1 & female_pct <= 1 ~ "0.1–1%",
+      TRUE                             ~ "<0.1%"
+    )
+  )
+
+# 5️ Join + plot
+up_map_plot <- up_map_sf %>%
+  left_join(nephro_female_up, by = c("NAME_2" = "final_district"))
+
+ggplot(up_map_plot) +
+  geom_sf(aes(fill = contrib_bin), color = "white", size = 0.2) +
+  scale_fill_manual(
+    values = c(">5%" = "darkred", "3–5%" = "black", "2–3%" = "orange", 
+               "1–2%" = "yellow", "0.1–1%" = "red", "<0.1%" = "lightblue"),
+    na.value = "grey80",
+    drop = FALSE
+  ) +
+  labs(
+    title = "Female Nephrology Patient Contribution (%) by District in Uttar Pradesh",
+    subtitle = paste("2010–2020, % of India Total =", total_patients_india),
+    fill = "% of India Total"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+
+```
+
+
+```{r heatmap UP and Bihar, fig.cap= "UP_Bihar_gender_heatmap"}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+
+# 1️⃣ Load shapefile
+india_districts <- st_read("/home/vandana/gender-bias/IND_adm2.shp")
+
+# 2️⃣ Filter map for Uttar Pradesh and Bihar
+india_districts <- india_districts %>%
+  mutate(
+    NAME_1 = str_to_title(str_trim(NAME_1)),
+    NAME_2 = str_to_title(str_trim(NAME_2))
+  ) %>%
+  filter(NAME_1 %in% c("Uttar Pradesh", "Bihar"))
+
+# 3️⃣ Load and summarize nephrology data
+summary_gender <- read.csv("/home/vandana/gender-bias/nephro_summary_with_distance.csv") %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(
+    final_state = str_to_title(str_trim(final_state)),
+    final_district = str_to_title(str_trim(final_district)),
+    final_district = ifelse(final_district == "Kanpur Nagar", "Kanpur", final_district)
+  ) %>%
+  group_by(final_state, final_district) %>%
+  summarise(
+    total_male = sum(male, na.rm = TRUE),
+    total_female = sum(female, na.rm = TRUE),
+    total_patients = sum(total_male_female, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 4️⃣ National total
+total_all <- sum(summary_gender$total_patients, na.rm = TRUE)
+
+# 5️⃣ Compute male and female % relative to national total
+summary_gender <- summary_gender %>%
+  mutate(
+    male_pct = round((total_male / total_all) * 100, 3),
+    female_pct = round((total_female / total_all) * 100, 3)
+  )
+
+# 6️⃣ Reshape data to long format for gender
+long_summary <- summary_gender %>%
+  pivot_longer(
+    cols = c(male_pct, female_pct),
+    names_to = "Gender",
+    values_to = "Percentage"
+  ) %>%
+  mutate(
+    Gender = ifelse(Gender == "male_pct", "Male", "Female"),
+    contrib_bin = case_when(
+      Percentage > 5                        ~ ">5%",
+      Percentage > 3 & Percentage <= 5      ~ "3–5%",
+      Percentage > 2 & Percentage <= 3      ~ "2–3%",
+      Percentage > 1 & Percentage <= 2      ~ "1–2%",
+      Percentage >= 0.1 & Percentage <= 1   ~ "0.1–1%",
+      TRUE                                  ~ "<0.1%"
+    )
+  )
+
+# 7️⃣ Define color palette
+bin_colors <- c(
+  ">5%" = "darkred",
+  "3–5%" = "black",
+  "2–3%" = "orange",
+  "1–2%" = "yellow",
+  "0.1–1%" = "red",
+  "<0.1%" = "lightblue"
+)
+
+# 8️⃣ Merge map with gender summary
+merged_map <- india_districts %>%
+  left_join(long_summary, by = c("NAME_1" = "final_state", "NAME_2" = "final_district"))
+
+# 9️⃣ Filter out districts with missing data
+merged_map_clean <- merged_map %>%
+  filter(!is.na(contrib_bin), Gender %in% c("Male", "Female"))
+
+# 🔟 Plot faceted map
+ggplot(merged_map_clean) +
+  geom_sf(aes(fill = contrib_bin), color = "white", size = 0.2) +
+  scale_fill_manual(
+    values = bin_colors,
+    drop = FALSE
+  ) +
+  labs(
+    title = "District-wise Percentage Contribution of Male and Female Nephrology Patients (2010–2020)",
+    subtitle = "Uttar Pradesh and Bihar | Percentage of National Total",
+    fill = "Contribution"
+  ) +
+  facet_wrap(~Gender) +
+  theme_minimal(base_size = 8) +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 10),
+    strip.text = element_text(face = "bold")
+  )
+
+```
+
+
+
+```{r heatmap_per_year, fig.cap= "heatmap Year Wise for India"}
+
+
+library(sf)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+
+# 1 Read shapefile
+india_districts <- st_read("/home/vandana/gender-bias/IND_adm2.shp")
+
+india_districts <- india_districts %>%
+  mutate(NAME_2 = str_to_title(str_trim(NAME_2)))
+
+# 2 Summarize nephrology data by district and year
+nephro_by_district_year <- nephro_summary_with_distance %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  mutate(
+    final_district = str_to_title(str_trim(final_district)),
+    final_district = ifelse(final_district == "Kanpur Nagar", "Kanpur", final_district)
+  ) %>%
+  group_by(v_year, final_district) %>%
+  summarise(
+    patient_count = sum(total_male_female, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 3️ Total patients per year
+yearly_totals <- nephro_by_district_year %>%
+  group_by(v_year) %>%
+  summarise(total_patients = sum(patient_count, na.rm = TRUE), .groups = "drop")
+
+# 4️ Calculate % contribution per district per year
+nephro_by_district_year <- nephro_by_district_year %>%
+  left_join(yearly_totals, by = "v_year") %>%
+  mutate(pct = patient_count / total_patients * 100)
+
+# 5️ Bin categories
+nephro_by_district_year <- nephro_by_district_year %>%
+  mutate(
+    contrib_bin = case_when(
+      pct > 50                    ~ ">50%",
+      pct > 4 & pct <= 50         ~ "4–50%",
+      pct > 2 & pct <= 4          ~ "2–4%",
+      pct > 1 & pct <= 2          ~ "1–2%",
+      pct >= 0.1 & pct <= 1       ~ "0.1–1%",
+      TRUE                        ~ "<0.1%"
+    )
+  )
+
+# 6️ Define colors
+bin_colors <- c(
+  ">50%" = "yellow",
+  "4–50%" = "orange",
+  "2–4%" = "blue",
+  "1–2%" = "green",
+  "0.1–1%" = "black",
+  "<0.1%" = "pink"
+)
+
+# 7️ Pair years for plotting
+year_pairs <- split(2010:2020, ceiling(seq_along(2010:2020) / 2))
+
+for (pair in year_pairs) {
+  ndy_pair <- nephro_by_district_year %>%
+    filter(v_year %in% pair)
+  
+  map_data_pair <- india_districts %>%
+    right_join(ndy_pair, by = c("NAME_2" = "final_district"))
+  
+  # Plot
+  print(
+    ggplot(map_data_pair) +
+      geom_sf(aes(fill = contrib_bin), color = "grey80", size = 0.1) +
+      scale_fill_manual(
+        values = bin_colors,
+        na.value = "grey90",
+        drop = FALSE
+      ) +
+      labs(
+        title = "Nephrology Patient Share by District",
+        subtitle = paste0("Years: ", paste(pair, collapse = " & "), 
+                          " | Each district’s % of national patient total"),
+        fill = "District share"
+      ) +
+      facet_wrap(~v_year, ncol = 1, nrow = 2, labeller = label_both) +
+      theme_minimal(base_size = 9) +
+      theme(
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        strip.text = element_text(face = "bold", size = 9)
+      )
+  )
+}
+
+```
+
+
+```{r combined heatmap, fig.cap= "combined_heatmap_year_wise"}
+
+
+library(sf)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(patchwork)
+
+# 1️ Read shapefile
+india_districts <- st_read("/home/vandana/gender-bias/IND_adm2.shp") %>%
+  mutate(NAME_2 = str_to_title(str_trim(NAME_2)))
+
+# 2️ Summarize data by district and year (2010–2020)
+nephro_by_district_year <- nephro_summary_with_distance %>%
+  filter(v_year >= 2010 & v_year <= 2020) %>%
+  group_by(v_year, final_district) %>%
+  summarise(
+    patient_count = sum(total_male_female, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    final_district = str_to_title(str_trim(final_district)),
+    final_district = ifelse(final_district == "Kanpur Nagar", "Kanpur", final_district)
+  )
+
+# 3️ Calculate total for each year
+yearly_totals <- nephro_by_district_year %>%
+  group_by(v_year) %>%
+  summarise(total_patients = sum(patient_count, na.rm = TRUE), .groups = "drop")
+
+# 4️ Calculate % contribution for each district per year
+nephro_by_district_year <- nephro_by_district_year %>%
+  left_join(yearly_totals, by = "v_year") %>%
+  mutate(pct = patient_count / total_patients * 100)
+
+# 5️ Categorize into bins
+nephro_by_district_year <- nephro_by_district_year %>%
+  mutate(
+    contrib_bin = case_when(
+      pct > 50                 ~ ">50%",
+      pct > 4  & pct <= 50     ~ "4-50%",
+      pct > 2  & pct <= 4      ~ "2-4%",
+      pct > 1  & pct <= 2      ~ "1-2%",
+      pct >= 0.1 & pct <= 1    ~ "0.1-1%",
+      TRUE                     ~ "<0.1%"
+    )
+  )
+
+# 6️ Define colors
+bin_colors <- c(
+  ">50%"   = "yellow",
+  "4-50%"  = "orange",
+  "2-4%"   = "blue",
+  "1-2%"   = "green",
+  "0.1-1%" = "black",
+  "<0.1%"  = "pink"
+)
+
+# 7️ Create list of cleaned-up maps
+plot_list <- list()
+for (yr in 2010:2020) {
+  ndy_year <- nephro_by_district_year %>% filter(v_year == yr)
+  map_data_year <- india_districts %>%
+    right_join(ndy_year, by = c("NAME_2" = "final_district"))
+  
+  p <- ggplot(map_data_year %>% filter(!is.na(contrib_bin))) +
+    geom_sf(aes(fill = contrib_bin), color = "grey80", size = 0.2) +
+    scale_fill_manual(
+      values = bin_colors,
+      na.value = "grey90",
+      drop = FALSE
+    ) +
+    labs(
+      title = paste("Year:", yr),
+      subtitle = paste("Total patients:", unique(ndy_year$total_patients))
+    ) +
+    theme_minimal(base_size = 9) +
+    theme(
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      legend.position = "none",
+      plot.title = element_text(face = "bold", size = 10),
+      plot.subtitle = element_text(size = 8)
+    )
+  
+  plot_list[[as.character(yr)]] <- p
+}
+
+# 8️ Combine plots: 4 per row
+combined_plot <- wrap_plots(plot_list, ncol = 4) &
+  theme(legend.position = "none")
+
+# 9️ Display the combined plot
+print(combined_plot)
+
+
+```
+
+
+Treatment in nephrology
+```{r}
+
+library(dplyr)
+
+# ────────────────────────────────────────────────────────────────
+# Step 1: Read input data
+merged_nephrology_data_unique <- read.csv(
+  "/home/vandana/gender-bias/Treatment_files/merged_nephrology_data_unique.csv",
+  stringsAsFactors = FALSE
+)
+
+FINAL_patient_visit_location_datav2 <- read.csv(
+  "/home/vandana/gender-bias/FINAL_patient_visit_location_datav2.csv",
+  stringsAsFactors = FALSE
+)
+
+missing_ids_matched_visits <- read.csv(
+  "/home/vandana/gender-bias/Treatment_files/missing_ids_matched_visits.csv",
+  stringsAsFactors = FALSE
+)
+
+# Parse date columns
+FINAL_patient_visit_location_datav2$v_date <- as.Date(FINAL_patient_visit_location_datav2$v_date)
+missing_ids_matched_visits$v_date <- as.Date(missing_ids_matched_visits$v_date)
+merged_nephrology_data_unique$order_confirmed_date <- as.Date(merged_nephrology_data_unique$order_confirmed_date)
+
+# ────────────────────────────────────────────────────────────────
+# Step 2: Create services table with earliest order_confirmed_date
+P_id_services_table <- merged_nephrology_data_unique %>%
+  group_by(patient_id) %>%
+  summarise(
+    services = paste(service_name, collapse = ", "),  # retain repetition
+    earliest_order_confirmed_date = min(order_confirmed_date, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ────────────────────────────────────────────────────────────────
+# Step 3: Prepare visit info: first and last visit dates by location
+
+# From main data
+main_data <- FINAL_patient_visit_location_datav2 %>%
+  filter(p_id %in% P_id_services_table$patient_id) %>%
+  group_by(p_id, p_gender, final_district, final_state) %>%
+  summarise(
+    first_v_date = min(v_date, na.rm = TRUE),
+    last_v_date = max(v_date, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# From matched missing data
+missing_data <- missing_ids_matched_visits %>%
+  group_by(p_id, p_gender, final_district, final_state) %>%
+  summarise(
+    first_v_date = min(v_date, na.rm = TRUE),
+    last_v_date = max(v_date, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Combine both
+combined_location_data <- bind_rows(main_data, missing_data)
+
+# ────────────────────────────────────────────────────────────────
+# Step 4: Merge with service table and export
+
+final_data <- P_id_services_table %>%
+  left_join(combined_location_data, by = c("patient_id" = "p_id"))
+
+# Save as CSV
+write.csv(
+  final_data,
+  "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates.csv",
+  row.names = FALSE
+)
+```
+
+
+
+```{r patient_service_file}
+
+# ── Libraries ────────────────────────────────────────────────────────────────
+library(readr)
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+# ── 1. Load the master file ──────────────────────────────────────────────────
+data_path <- "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates.csv"
+df <- read_csv(data_path, col_types = cols())
+
+# ── 2. Explode the comma‑separated `services` column 
+service_long <- df %>%
+  select(patient_id, p_gender, final_district, final_state, services) %>%
+  mutate(services = str_split(services, ",")) %>%   # list column
+  unnest(services) %>%                              # → one row per service
+  mutate(services = str_trim(services))             # trim spaces
+
+# ── 3. Count how many times each patient used each service ───────────────────
+service_count <- service_long %>%
+  group_by(patient_id, p_gender, final_district, final_state, services) %>%
+  summarise(count = n(), .groups = "drop")
+
+# ── 4. Pivot wider (one column per service) ──────────────────────────────────
+patient_service_table <- service_count %>%
+  pivot_wider(
+    names_from  = services,
+    values_from = count,
+    values_fill = 0
+  )
+
+# ── 5. Write to CSV ──────────────────────────────────────────────────────────
+write_csv(
+  patient_service_table,
+  "/home/vandana/gender-bias/Treatment_files/patient_service_table.csv"
+)
+
+```
+
+
+```{r Transplant file}
+library(dplyr)
+library(readr)
+
+# ✅ Step 1: Read data files
+p_id_services_with_location_dates <- read_csv(
+  "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates.csv",
+  col_types = cols()
+)
+
+nephrology_data_death <- read_csv(
+  "/home/vandana/gender-bias/Treatment_files/nephrology-data-death-20250618.csv",
+  col_types = cols()
+)
+
+nephro_data <- read_csv(
+  "/home/vandana/gender-bias/Treatment_files/merged_nephrology_data_unique.csv",
+  col_types = cols()
+)
+
+# ✅ Step 2: Merge death info
+matched_data <- p_id_services_with_location_dates %>%
+  left_join(
+    nephrology_data_death %>%
+      select(patient_id, death_datetime),
+    by = "patient_id"
+  ) %>%
+  filter(!is.na(final_district), p_gender != "Unknown")
+
+# ✅ Step 3: Identify transplant patients
+transplant_patients <- matched_data %>%
+  filter(grepl("RENAL TRANSPLANTATION \\(RECEPIENT\\)", services)) %>%
+  select(patient_id, p_gender, final_district, final_state, last_v_date, death_datetime)
+
+# ✅ Step 4: Extract transplant order confirmation dates
+transplant_orders <- nephro_data %>%
+  filter(service_name == "RENAL TRANSPLANTATION (RECEPIENT)",
+         patient_id %in% transplant_patients$patient_id) %>%
+  select(patient_id, order_confirmed_date) %>%
+  group_by(patient_id) %>%
+  summarise(order_confirmed_date = min(order_confirmed_date, na.rm = TRUE), .groups = "drop")
+
+# ✅ Step 5: Merge and save final output
+final_transplant_table <- transplant_patients %>%
+  left_join(transplant_orders, by = "patient_id")
+
+write_csv(
+  final_transplant_table,
+  "/home/vandana/gender-bias/Treatment_files/transplant_patients_table.csv"
+)
+
+```
+
+
+
+```{r Treatment by gender, fig.cap= "treatment_by_gender"}
+
+#24_Patients Using Each Service by Gender (≥1 time) and their average usage Treatment
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# ── STEP 1: Load data ───────────────────────────────
+patient_service_table <- read_csv("/home/vandana/gender-bias/Treatment_files/patient_service_table.csv")
+
+# ── STEP 2: Select the 12 services ──────────────────
+selected_services <- c(
+  "Haemodialysis reprocessing unit",
+  "Haemodialysis Maintenence",
+  "Reuse Haemodialysis",
+  "Tunneled cuffed dialysis catheter(Permacath) insertion",
+  "RENAL TRANSPLANTATION (RECEPIENT)",
+  "Plasmapheresis+Hemodialysis(1st Session)",
+  "Plasmapheresis(Reuse)+Hemodialysis(reuse)",
+  "Peritoneal Dialysis Manual",
+  "Peritoneal Dialysis Cycler",
+  "USG guided internal Jugular Dialysis catheter insertion",
+  "TOTAL PARATHYROIDECTOMY WITHOUT TRANSPLANTATION",
+  "Haemodialysis (Initial)"
+)
+
+# ── STEP 3 (revised) : counts + overall‑percent ──────────────────────────────
+service_patient_percent_gender <- patient_service_table %>%
+  filter(tolower(p_gender) %in% c("male", "female")) %>%
+  mutate(p_gender = tolower(p_gender)) %>%
+  summarise(across(all_of(selected_services), list(
+    male   = ~ sum(. > 0 & p_gender == "male",   na.rm = TRUE),
+    female = ~ sum(. > 0 & p_gender == "female", na.rm = TRUE)
+  ))) %>%
+  pivot_longer(
+    cols        = everything(),
+    names_to    = c("Service", "p_gender"),
+    names_sep   = "_",
+    values_to   = "Count"
+  ) %>%
+  mutate(Percent = round(100 * Count / sum(Count), 2))   # <-- one global sum
+
+# ── PLOT 1 : % of patients using each service by gender (global denominator) ─
+ggplot(service_patient_percent_gender,
+       aes(x = reorder(Service, Percent), y = Percent, fill = p_gender)) +
+  geom_bar(stat = "identity", width = 0.5, position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("female" = "#E69F00", "male" = "#56B4E9"),
+                    labels = c("female" = "Female", "male" = "Male")) +
+  labs(
+    title = "% of Patients Using Each Service by Gender (≥1 time)",
+    x = "Service",
+    y = "Percentage of All Service Uses (Male + Female)",
+    fill = "Gender"
+  ) +
+  theme_minimal(base_size = 10)
+```
+
+
+```{r Treatment by gender_stacked, fig.cap= "stacked_plot_treatment_by_gender"}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# ── STEP 1: Load data ───────────────────────────────
+patient_service_table <- read_csv("/home/vandana/gender-bias/Treatment_files/patient_service_table.csv")
+
+# ── STEP 2: Select the 12 services ──────────────────
+selected_services <- c(
+  "Haemodialysis reprocessing unit",
+  "Haemodialysis Maintenence",
+  "Reuse Haemodialysis",
+  "Tunneled cuffed dialysis catheter(Permacath) insertion",
+  "RENAL TRANSPLANTATION (RECEPIENT)",
+  "Plasmapheresis+Hemodialysis(1st Session)",
+  "Plasmapheresis(Reuse)+Hemodialysis(reuse)",
+  "Peritoneal Dialysis Manual",
+  "Peritoneal Dialysis Cycler",
+  "USG guided internal Jugular Dialysis catheter insertion",
+  "TOTAL PARATHYROIDECTOMY WITHOUT TRANSPLANTATION",
+  "Haemodialysis (Initial)"
+)
+
+# ── STEP 3: Count M/F patients using each service ──
+service_patient_stacked <- patient_service_table %>%
+  filter(tolower(p_gender) %in% c("male", "female")) %>%
+  mutate(p_gender = tolower(p_gender)) %>%
+  summarise(across(all_of(selected_services), list(
+    male   = ~ sum(. > 0 & p_gender == "male",   na.rm = TRUE),
+    female = ~ sum(. > 0 & p_gender == "female", na.rm = TRUE)
+  ))) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = c("Service", "p_gender"),
+    names_sep = "_",
+    values_to = "Count"
+  ) %>%
+  group_by(Service) %>%
+  mutate(Total = sum(Count)) %>%
+  ungroup()
+
+# ── PLOT 1 (Updated): Stacked bar plot with only female labels ─
+ggplot(service_patient_percent_gender,
+       aes(x = reorder(Service, Percent), y = Percent, fill = p_gender)) +
+  geom_bar(stat = "identity", width = 0.6, position = "stack") +
+  geom_text(
+    data = subset(service_patient_percent_gender, p_gender == "female"),
+    aes(label = Count),
+    position = position_stack(vjust = 3),
+    size = 3,
+    color = "black"
+  ) +
+  coord_flip() +
+  scale_fill_manual(
+    values = c("female" = "#E69F00", "male" = "#56B4E9"),
+    labels = c("female" = "Female", "male" = "Male")
+  ) +
+  labs(
+    title = "% of Patients Using Each Service by Gender (≥1 time)",
+    subtitle = "labeling is the female count",
+    x = "Service",
+    y = "Percentage of All Service Uses (Male + Female)",
+    fill = "Gender"
+  ) +
+  theme_minimal(base_size = 10)
+
+
+```
+
+
+
+
+```{r service_utilization_by_district, fig.cap= "service_utilization_by_district"}
+
+# 25_stacked plot for services
+
+library(dplyr)
+library(readr)
+library(tidyr)
+library(ggplot2)
+
+# ── Step 1: Load the dataset ─────────────────────────────
+patient_service_table <- read_csv("/home/vandana/gender-bias/Treatment_files/patient_service_table.csv")
+
+# ── Step 2: Count patients per district and compute cumulative percentage ───
+district_patient_counts <- patient_service_table %>%
+  group_by(final_district) %>%
+  summarise(patient_count = n_distinct(patient_id), .groups = "drop") %>%
+  arrange(desc(patient_count)) %>%
+  mutate(cumulative_percent = cumsum(patient_count) / sum(patient_count) * 100)
+
+# ── Step 3: Select districts that contribute to 80% of patients ─────────────
+districts_80 <- district_patient_counts %>%
+  filter(cumulative_percent <= 80) %>%
+  pull(final_district)
+
+# ── Step 4: Define service columns ──────────────────────────────────────────
+service_columns <- colnames(patient_service_table)[5:16]
+
+# ── Step 5: Pivot the full dataset to long format to get total service counts ─
+all_services_long <- patient_service_table %>%
+  select(final_district, all_of(service_columns)) %>%
+  pivot_longer(
+    cols = all_of(service_columns),
+    names_to = "service",
+    values_to = "used"
+  ) %>%
+  filter(used > 0)
+
+# Total number of services used across ALL districts
+total_service_usage_all_districts <- nrow(all_services_long)
+
+# ── Step 6: Filter data for top 80% districts only ───────────────────────────
+filtered_data <- patient_service_table %>%
+  filter(final_district %in% districts_80)
+
+# ── Step 7: Pivot filtered data to long format ──────────────────────────────
+service_long_80 <- filtered_data %>%
+  select(final_district, all_of(service_columns)) %>%
+  pivot_longer(
+    cols = all_of(service_columns),
+    names_to = "service",
+    values_to = "used"
+  ) %>%
+  filter(used > 0)
+
+# ── Step 8: Calculate service percentage per district (with global denominator) ─
+service_percent <- service_long_80 %>%
+  group_by(final_district, service) %>%
+  summarise(service_count = n(), .groups = "drop") %>%
+  mutate(percent = service_count / total_service_usage_all_districts * 100)
+
+#abbrevation # Create a named vector for abbreviation mapping
+service_abbrev <- c(
+  "Haemodialysis reprocessing unit" = "HD Reproc",
+  "Haemodialysis Maintenence" = "HD Maint",
+  "Reuse Haemodialysis" = "HD Reuse",
+  "Tunneled cuffed dialysis catheter(Permacath) insertion" = "Permacath Ins",
+  "RENAL TRANSPLANTATION (RECEPIENT)" = "Renal Tx",
+  "Plasmapheresis+Hemodialysis(1st Session)" = "PP+HD (1st)",
+  "Plasmapheresis(Reuse)+Hemodialysis(reuse)" = "PP+HD (Reuse)",
+  "Peritoneal Dialysis Manual" = "PD Manual",
+  "Peritoneal Dialysis Cycler" = "PD Cycler",
+  "USG guided internal Jugular Dialysis catheter insertion" = "USG IJC Ins",
+  "TOTAL PARATHYROIDECTOMY WITHOUT TRANSPLANTATION" = "TPTX",
+  "Haemodialysis (Initial)" = "HD Init"
+)
+
+# Replace service names with abbreviations
+service_percent$service <- recode(service_percent$service, !!!service_abbrev)
+
+# ── Step 9: Plot stacked bar chart ───────────────────────────────────────────
+ggplot(service_percent, aes(x = reorder(final_district, -percent), y = percent, fill = service)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Service Utilization in Top 80% Districts (as % of All Services)",
+    x = "District",
+    y = "Percentage of Total Services"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = guide_legend(title = "Service (Abbrev)"))
+
+
+#without lucknow
+service_percent_no_lucknow <- service_percent %>%
+  filter(final_district != "lucknow")
+
+ggplot(service_percent_no_lucknow, aes(x = reorder(final_district, -percent), y = percent, fill = service)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Service Utilization (Excluding Lucknow)",
+    x = "District",
+    y = "Percentage of Patient Visit for Services"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = guide_legend(title = "Service (Abbrev)"))
+
+```
+
+
+
+```{r}
+# Load required libraries
+library(dplyr)
+library(readr)
+
+# Read the full data, select needed columns, and remove duplicates
+services_per_year <- read.csv("/home/vandana/gender-bias/merged_nephrology_data.csv") %>%
+  select(patient_id, service_name, order_confirmed_date) %>%
+  distinct()
+
+# Save the cleaned subset to a new CSV
+write_csv(services_per_year, "/home/vandana/gender-bias/Treatment_files/services_per_year.csv")
+
+```
+
+
+
+```{r services_over_years, fig.cap= "services_over_years"}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(stringr)
+library(lubridate)
+
+# ── Step 1: Read dataset ──
+patient_service_table <- read.csv("/home/vandana/gender-bias/Treatment_files/services_per_year.csv")
+
+# ── Step 2: Convert order_confirmed_date to Date format and extract year ──
+patient_service_table <- patient_service_table %>%
+  mutate(
+    order_confirmed_date = as.POSIXct(order_confirmed_date),
+    v_year = year(order_confirmed_date)
+  ) %>%
+  filter(!is.na(v_year))
+
+# ── Step 3: Define 12 services of interest ──
+services <- c(
+  "Haemodialysis reprocessing unit",
+  "Haemodialysis Maintenence",
+  "Reuse Haemodialysis",
+  "Tunneled cuffed dialysis catheter(Permacath) insertion",
+  "RENAL TRANSPLANTATION (RECEPIENT)",
+  "Plasmapheresis+Hemodialysis(1st Session)",
+  "Plasmapheresis(Reuse)+Hemodialysis(reuse)",
+  "Peritoneal Dialysis Manual",
+  "Peritoneal Dialysis Cycler",
+  "USG guided internal Jugular Dialysis catheter insertion",
+  "TOTAL PARATHYROIDECTOMY WITHOUT TRANSPLANTATION",
+  "Haemodialysis (Initial)"
+)
+
+# ── Step 4: Filter for those services ──
+long_service_data <- patient_service_table %>%
+  filter(service_name %in% services) %>%
+  group_by(v_year, service_name) %>%
+  summarise(Patient_Count = n(), .groups = "drop") %>%
+  rename(Service = service_name)
+
+# ── Step 5: Rename services to abbreviations ──
+abbreviations <- c(
+  "Haemodialysis reprocessing unit" = "HD Reproc",
+  "Haemodialysis Maintenence" = "HD Maint",
+  "Reuse Haemodialysis" = "HD Reuse",
+  "Tunneled cuffed dialysis catheter(Permacath) insertion" = "Permacath Ins",
+  "RENAL TRANSPLANTATION (RECEPIENT)" = "Renal Tx",
+  "Plasmapheresis+Hemodialysis(1st Session)" = "PP+HD (1st)",
+  "Plasmapheresis(Reuse)+Hemodialysis(reuse)" = "PP+HD (Reuse)",
+  "Peritoneal Dialysis Manual" = "PD Manual",
+  "Peritoneal Dialysis Cycler" = "PD Cycler",
+  "USG guided internal Jugular Dialysis catheter insertion" = "USG IJC Ins",
+  "TOTAL PARATHYROIDECTOMY WITHOUT TRANSPLANTATION" = "TPTX",
+  "Haemodialysis (Initial)" = "HD Init"
+)
+
+long_service_data$Service <- abbreviations[long_service_data$Service]
+
+# ── Step 6: Calculate percentage of total ──
+total_services <- sum(long_service_data$Patient_Count, na.rm = TRUE)
+
+long_data <- long_service_data %>%
+  mutate(
+    Percent = round(100 * Patient_Count / total_services, 2)
+  )
+
+# ── Step 7: Plot ──
+ggplot(long_data, aes(x = v_year, y = Percent, color = Service, group = Service)) +
+  geom_line(size = 0.5) +
+  geom_point(size = 0.7) +
+  labs(
+    title = "Service Distribution Across Years (as % of Total Services)",
+    subtitle = "Overall share of services, shown over time",
+    x = "Year",
+    y = "Percentage of Total Services",
+    color = "Service"
+  ) +
+  scale_x_continuous(breaks = sort(unique(long_data$v_year))) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.spacing.y = unit(0.2, "cm")
+  ) +
+  scale_color_discrete()
+
+```
+
+
+
+```{r kaplan Meier Survival plot, fig.cap= "Kaplan_Meier_for_Transplant"}
+
+
+library(readr)
+library(dplyr)
+library(survival)
+library(survminer)
+library(lubridate)
+
+# ── 1. Load pre-filtered transplant patient data ─────────────────────────────
+transplant_patients_table <- read_csv(
+  "/home/vandana/gender-bias/Treatment_files/transplant_patients_table.csv",
+  col_types = cols()
+)
+
+# ── 2. Convert date columns ──────────────────────────────────────────────────
+transplant_patients_table <- transplant_patients_table %>%
+  mutate(
+    order_confirmed_date = as.Date(order_confirmed_date),
+    last_v_date          = as.Date(last_v_date),
+    death_datetime       = ymd_hms(death_datetime, tz = "UTC")
+  )
+
+# ── 3. Compute survival info ─────────────────────────────────────────────────
+renal_transplant_survival <- transplant_patients_table %>%
+  mutate(
+    status = if_else(is.na(death_datetime), 0, 1),
+    end_date = if_else(is.na(death_datetime),
+                       as.POSIXct(last_v_date),
+                       death_datetime),
+    years_survived = as.numeric(difftime(end_date, order_confirmed_date, units = "days")) / 365.25
+  ) %>%
+  filter(!is.na(order_confirmed_date), years_survived >= 0) %>%
+  mutate(
+    p_gender = tolower(p_gender),
+    p_gender = factor(p_gender, levels = c("male", "female"))
+  )
+
+# ── 4. Create survival object and fit ────────────────────────────────────────
+surv_obj_tx <- Surv(time = renal_transplant_survival$years_survived, 
+                    event = renal_transplant_survival$status)
+km_fit_tx <- survfit(surv_obj_tx ~ p_gender, data = renal_transplant_survival)
+
+# ── 5. Plot KM curve with number at risk every 2 years ──────────────────────
+ggsurvplot(
+  km_fit_tx,
+  data = renal_transplant_survival,
+  risk.table = TRUE,
+  break.time.by = 2,
+  xlim = c(0, 16),
+  pval = TRUE,
+  conf.int = TRUE,
+  xlab = "Years Survived (from Transplant Date)",
+  ylab = "Survival Probability",
+  title = "Kaplan–Meier Survival Curve by Gender\nRenal Transplant Recipients",
+  palette = c("cyan", "orange"),
+  risk.table.height = 0.25,
+  fontsize = 3,
+  line.size = 0.3,
+  linetype = "dotted",
+  ggtheme = theme_minimal(base_size = 10),
+  legend = "top"
+)
+
+```
+
+
+```{r Kaplan Meier for districts for transplant, fig.cap= "Kaplan_meier_district"}
+
+
+library(dplyr)
+library(readr)
+library(lubridate)
+library(survival)
+library(survminer)
+library(RColorBrewer)   # nice 5‑colour palette for the plot
+
+# ── 1. Load the table (if not already in memory) ────────────────────────────
+# transplant_patients_table <- read_csv("path/to/file.csv")
+
+# ── 2. Patient counts and % contribution by district‑state ─────────────────
+district_summary <- transplant_patients_table %>%
+  group_by(final_state, final_district) %>%
+  summarise(patients = n_distinct(patient_id), .groups = "drop") %>%
+  arrange(desc(patients)) %>%
+  mutate(perc_total = round(100 * patients / sum(patients), 1))
+
+print(district_summary)          # view full list
+top5 <- slice_head(district_summary, n = 5)   # keep the first 5 rows
+
+# ── 3. Keep only patients from the top‑5 districts ─────────────────────────
+transplant_top5 <- transplant_patients_table %>%
+  semi_join(top5, by = c("final_state", "final_district"))
+
+# ── 4. Convert date/datetime columns ───────────────────────────────────────
+transplant_top5 <- transplant_top5 %>%
+  mutate(
+    order_confirmed_date = as.Date(order_confirmed_date),
+    last_v_date          = as.Date(last_v_date),
+    death_datetime       = ymd_hms(death_datetime, tz = "UTC")
+  )
+
+# ── 5. Build survival data frame ───────────────────────────────────────────
+surv_top5 <- transplant_top5 %>%
+  mutate(
+    status = if_else(is.na(death_datetime), 0, 1),
+    end_date = if_else(is.na(death_datetime),
+                       as.POSIXct(last_v_date),
+                       death_datetime),
+    years_survived = as.numeric(difftime(end_date, order_confirmed_date,
+                                         units = "days")) / 365.25,
+    final_district = factor(final_district)   # keep districts as factor
+  ) %>%
+  filter(!is.na(order_confirmed_date), years_survived >= 0)
+
+
+# ── 6. One KM plot per top‑5 district ─────────────────────────────────────
+library(purrr)      # for map()
+library(stringr)    # nice labels
+
+top_districts <- levels(surv_top5$final_district)   # exactly 5 levels
+
+km_plots <- map(top_districts, function(dstr) {
+  data_d <- surv_top5 %>% filter(final_district == dstr)
+
+  fit_d <- survfit(Surv(years_survived, status) ~ 1, data = data_d)
+
+  ggsurvplot(
+    fit_d,
+    data            = data_d,
+    risk.table      = TRUE,
+    conf.int        = TRUE,
+    break.time.by   = 2,
+    xlim            = c(0, 16),
+    xlab            = "Years Survived (from Transplant Date)",
+    ylab            = "Survival Probability",
+    title           = str_c("Kaplan–Meier Curve – ", dstr),
+    palette         = brewer.pal(5, "Set1")[which(top_districts == dstr)],
+    risk.table.height = 0.25,
+    ggtheme         = theme_minimal(),
+    fontsize        = 3,
+    line.size       = 0.5
+  )
+})
+
+names(km_plots) <- top_districts   # so you can reference by district name
+
+# ── 6c. Print or save ─────────────────────────────────────────────────────
+# To display all in sequence:
+walk(km_plots, print)
+
+# To save each as PNG:
+# walk2(km_plots, names(km_plots), ~ ggsave(paste0("KM_", .y, ".png"), plot = .x$plot, dpi = 300, width = 6, height = 4))
+
+```
+
+```{r}
+# ── Libraries ───────────────────────────────────────────────────────────────
+library(readr)
+library(dplyr)
+library(stringr)
+library(stringi)
+library(tools)          # toTitleCase()
+library(lubridate)      # year()
+
+# ── File paths ──────────────────────────────────────────────────────────────
+main_file   <- "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates.csv"
+corr_file   <- "/home/vandana/gender-bias/Treatment_files/Corrected_districts_Sheet_new.csv"
+census_file <- "/home/vandana/gender-bias/india-districts-census-2011.csv"
+out_file    <- "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates_2011.csv"
+
+# ── Helper: standardise names (lower‑case, trim, rm. punctuation, de‑accent) ─
+standardise_name <- function(x) {
+  x %>%
+    str_to_lower() %>%
+    str_squish() %>%
+    str_replace_all("[^[:alnum:] ]", "") %>%
+    stri_trans_general("Latin-ASCII")
+}
+
+# 1. READ INPUT FILES ────────────────────────────────────────────────────────
+df_main <- read_csv(main_file, col_types = cols()) %>%
+  mutate(order_confirmed_date = as.Date(earliest_order_confirmed_date))
+
+df_corr <- read_csv(corr_file, col_types = cols(
+  final_state        = col_character(),
+  final_district     = col_character(),
+  match_flag         = col_character(),
+  Corrected_state    = col_character(),
+  Corrected_district = col_character()
+)) %>%
+  filter(!is.na(Corrected_state) & !is.na(Corrected_district))
+
+df_census <- read_csv(census_file, col_types = cols())
+
+# 2. KEEP ONLY 2011 DATA & VALID GENDERS ─────────────────────────────────────
+df_main <- df_main %>%
+  filter(year(order_confirmed_date) == 2011,
+         p_gender != "Unknown") %>%
+  mutate(
+    final_state    = str_trim(str_to_lower(final_state)),
+    final_district = str_trim(str_to_lower(final_district))
+  ) %>%
+  mutate(                       # hard‑coded fixes (unchanged from your script)
+    final_district = case_when(
+      final_district == "amethi"        ~ "faizabad",
+      final_district == "maharajganj"   ~ "mahrajganj",
+      final_district == "lucknow bihar" ~ NA_character_,
+      TRUE                              ~ final_district
+    ),
+    final_state = case_when(
+      final_state == "lucknow bihar"    ~ NA_character_,
+      TRUE                              ~ final_state
+    )
+  )
+
+# 3. CLEAN CORRECTION SHEET (same as before) ────────────────────────────────
+df_corr <- df_corr %>%
+  mutate(across(c(final_state, final_district,
+                  Corrected_state, Corrected_district),
+                ~ str_trim(str_to_lower(.x)))) %>%
+  mutate(
+    Corrected_district = case_when(
+      Corrected_district == "barabanki"       ~ "bara banki",
+      Corrected_district == "raebareli"       ~ "rae bareli",
+      Corrected_district == "kanpur"          ~ "kanpur nagar",
+      Corrected_district == "kansganj"        ~ "etah",
+      Corrected_district == "amethi"          ~ "faizabad",
+      Corrected_district == "lakhimpur kheri" ~ "kheri",
+      Corrected_district == "harthras"        ~ "aligarh",
+      TRUE                                    ~ Corrected_district
+    ),
+    Corrected_state = case_when(
+      Corrected_state == "odisha"       ~ "orissa",
+      Corrected_state == "uttaranchal"  ~ "uttarakhand",
+      TRUE                              ~ Corrected_state
+    )
+  )
+
+# 4. APPLY CORRECTIONS ──────────────────────────────────────────────────────
+df_fixed <- df_main %>%
+  left_join(df_corr, by = c("final_state", "final_district")) %>%
+  mutate(
+    final_state    = coalesce(Corrected_state,    final_state),
+    final_district = coalesce(Corrected_district, final_district)
+  ) %>%
+  select(-match_flag, -Corrected_state, -Corrected_district) %>%
+  mutate(
+    final_state    = toTitleCase(final_state),
+    final_district = toTitleCase(final_district)
+  )
+
+# 5. BUILD CLEAN CENSUS LOOK‑UP TABLE ────────────────────────────────────────
+census_key <- df_census %>%
+  rename(state_raw = `State name`,
+         district_raw = `District name`) %>%
+  mutate(
+    std_state    = standardise_name(state_raw),
+    std_district = standardise_name(district_raw)
+  ) %>%
+  distinct(std_state, std_district) %>%
+  mutate(in_census = TRUE)
+
+# 6. DROP ROWS WHOSE DISTRICTS ARE NOT IN 2011 CENSUS ───────────────────────
+df_final_2011 <- df_fixed %>%
+  mutate(
+    std_state    = standardise_name(final_state),
+    std_district = standardise_name(final_district)
+  ) %>%
+  left_join(census_key,
+            by = c("std_state", "std_district")) %>%
+  filter(!is.na(in_census)) %>%
+  select(-std_state, -std_district, -in_census)
+
+# 7. SAVE RESULT ────────────────────────────────────────────────────────────
+write_csv(df_final_2011, out_file)
+cat("✅ 2011‑filtered, census‑matched dataset written to:\n", out_file, "\n")
+
+
+```
+
+```{r}
+
+# ── Libraries ──────────────────────────────────────────────────────────────
+library(dplyr)
+library(readr)
+library(stringr)
+library(geosphere)
+
+# ── Parameters / file paths ────────────────────────────────────────────────
+patient_file   <- "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates_2011.csv"
+census_file    <- "/home/vandana/gender-bias/india-districts-census-2011.csv"
+centroid_file  <- "/home/vandana/gender-bias/district_wise_centroids.csv"
+merged_out     <- "/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2011.csv"
+
+# ── Helper: simple name standardiser ───────────────────────────────────────
+standardise <- function(x) {
+  x %>%
+    str_to_lower() %>% str_trim() %>%
+    str_replace_all("[[:punct:]]", "") %>%
+    str_replace_all("\\s+", " ")
+}
+
+# ── STEP 1: Load 2011 patient data & count patients by district ────────────
+patients_2011 <- read_csv(patient_file, col_types = cols()) %>%
+  mutate(
+    final_state    = standardise(final_state),
+    final_district = standardise(final_district),
+    p_gender       = standardise(p_gender)
+  )
+
+district_counts <- patients_2011 %>%
+  group_by(final_state, final_district) %>%
+  summarise(
+    male_patients   = n_distinct(patient_id[p_gender == "male"]),
+    female_patients = n_distinct(patient_id[p_gender == "female"]),
+    patients        = male_patients + female_patients,
+    .groups         = "drop"
+  ) %>%
+  arrange(desc(patients)) %>%
+  mutate(
+    perc     = patients / sum(patients),
+    cum_perc = cumsum(perc)
+  )
+
+# ── STEP 2: Keep districts that cumulatively cover top 80 % of patients ───
+districts_80 <- district_counts %>% filter(cum_perc <= 0.80)
+
+
+# ── STEP 3: Load census 2011 & standardise names ───────────────────────────
+census_data <- read_csv(census_file, col_types = cols()) %>%
+  rename(final_state = `State name`,
+         final_district = `District name`) %>%
+  mutate(
+    final_state    = standardise(final_state),
+    final_district = standardise(final_district)
+  )
+
+# columns to pull
+census_vars <- c(
+  "Population", "Male", "Female", "Literate", "Male_Literate", "Female_Literate",
+  "Workers", "Male_Workers", "Female_Workers", "Household_Workers",
+  "LPG_or_PNG_Households", "Housholds_with_Electric_Lighting",
+  "Households_with_Internet", "Households_with_Computer",
+  "Rural_Households", "Urban_Households", "Secondary_Education",
+  "Graduate_Education", "Power_Parity_Rs_90000_150000",
+  "Power_Parity_Rs_150000_330000", "Power_Parity_Rs_330000_545000"
+)
+
+census_sel <- census_data %>%
+  select(final_state, final_district, all_of(census_vars))
+
+# ── STEP 4: Merge top‑80 districts with census data ────────────────────────
+merged <- districts_80 %>%
+  left_join(census_sel, by = c("final_state", "final_district"))
+
+# ── STEP 5: Attach centroid coordinates & compute distance to Lucknow ─────
+centroids <- read_csv(centroid_file, col_types = cols()) %>%
+  mutate(
+    join_state    = standardise(State),
+    join_district = standardise(District)
+  )
+
+merged_key <- merged %>%
+  mutate(
+    join_state    = final_state,
+    join_district = if_else(final_district == "kanpur nagar", "kanpur", final_district)
+  )
+
+lucknow_coords <- c(lon = 80.89706, lat = 26.838234)   # (E, N)
+
+merged_dist <- merged_key %>%
+  left_join(centroids %>% select(join_state, join_district, Latitude, Longitude),
+            by = c("join_state", "join_district")) %>%
+  rowwise() %>%
+  mutate(
+    Distance_km = ifelse(!is.na(Latitude) & !is.na(Longitude),
+                         distHaversine(c(Longitude, Latitude), lucknow_coords) / 1000,
+                         NA_real_)
+  ) %>%
+  ungroup() %>%
+  mutate(Distance_km = round(Distance_km, 2)) %>%
+  select(-join_state, -join_district)
+
+# ── STEP 6: Save final file ────────────────────────────────────────────────
+write_csv(merged_dist, merged_out)
+cat("✅ Final merged file with male/female counts saved →", merged_out, "\n")
+
+
+```
+
+Socio economic correlation with census data
+```{r female patient vs education spearman coor 2011, fig.cap= "female patient vs education spearman coor 2011" }
+
+
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(readr)
+
+# ── 1. Load the census‑enhanced, gender‑split dataset (2011) ───────────────
+districts_data <- read_csv(
+  "/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2011.csv"
+)
+
+# ── 2. Build the composite score (Female literacy, workforce, census Female) ─
+female_score_data <- districts_data %>%
+  transmute(
+    final_district,
+    female_patients = female_patients,   # <- matches new lowercase field
+    composite_score = rowMeans(
+      cbind(
+        scale(Female_Literate, center = TRUE, scale = TRUE),
+        scale(Female_Workers,  center = TRUE, scale = TRUE),
+        scale(Female,          center = TRUE, scale = TRUE)
+      ),
+      na.rm = TRUE
+    )
+  )
+
+# ── 3. Spearman correlation ────────────────────────────────────────────────
+rho <- cor(
+  female_score_data$composite_score,
+  female_score_data$female_patients,
+  method = "spearman",
+  use = "complete.obs"
+)
+rho_label <- paste0("Spearman ρ = ", round(rho, 2))
+
+
+# ── build & show plot ────────────────────────────────────────────────────
+ggplot(female_score_data,
+       aes(x = composite_score, y = female_patients)) +
+  geom_point(size = 2, alpha = 0.7, colour = "#0072B2") +
+  geom_text_repel(aes(label = final_district), size = 3, max.overlaps = Inf) +
+  annotate(
+    "text",
+    x = max(female_score_data$composite_score, na.rm = TRUE),
+    y = max(female_score_data$female_patients,  na.rm = TRUE),
+    label = rho_label,
+    hjust = 1.1, vjust = 1.1,
+    size  = 4, fontface = "italic"
+  ) +
+  labs(
+    title    = "Female Education Composite Score(census 2011) vs Female Patient Count(2011)",
+    subtitle = "Composite = avg(z) of Female Literacy, Workforce Participation, and Census Female population",
+    x        = "Composite Score (Z‑scaled)",
+    y        = "Female Patient Count"
+  ) +
+  theme_minimal(base_size = 11)
+
+```
+
+```{r infrastructure vs female patient spearman cor, fig.cap= "infrastructure vs female patient spearman cor"}
+
+# ── Libraries ───────────────────────────────────────────────────────────────
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(readr)
+
+# ── 1. Load the census‑enhanced, gender‑split dataset (2011) ───────────────
+districts_data <- read_csv(
+  "/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2011.csv"
+)
+
+# ── 2. Build the composite score (Female literacy, workforce, census Female) ─
+female_score_data <- districts_data %>%
+  transmute(
+    final_district,
+    female_patients = female_patients,   # <- matches new lowercase field
+    composite_score = rowMeans(
+      cbind(
+        scale(Housholds_with_Electric_Lighting, center = TRUE, scale = TRUE),
+        scale(Households_with_Internet,         center = TRUE, scale = TRUE),
+        scale(Households_with_Computer,         center = TRUE, scale = TRUE),
+        scale(Urban_Households,                 center = TRUE, scale = TRUE)
+      ),
+      na.rm = TRUE
+    )
+  )
+
+# ── 3. Spearman correlation ────────────────────────────────────────────────
+rho <- cor(
+  female_score_data$composite_score,
+  female_score_data$female_patients,
+  method = "spearman",
+  use = "complete.obs"
+)
+rho_label <- paste0("Spearman ρ = ", round(rho, 2))
+
+
+# ── build & show plot ────────────────────────────────────────────────────
+ggplot(female_score_data,
+       aes(x = composite_score, y = female_patients)) +
+  geom_point(size = 2, alpha = 0.7, colour = "#0072B2") +
+  geom_text_repel(aes(label = final_district), size = 3, max.overlaps = Inf) +
+  annotate(
+    "text",
+    x = max(female_score_data$composite_score, na.rm = TRUE),
+    y = max(female_score_data$female_patients,  na.rm = TRUE),
+    label = rho_label,
+    hjust = 1.1, vjust = 1,
+    size  = 4, fontface = "italic"
+  ) +
+  labs(
+    title    = "Infra structure Composite Score vs Female Patient Count",
+    subtitle = "Composite = avg(z) of Electricity, Internet, Computer and urban household",
+    x        = "Composite Score (Z‑scaled)",
+    y        = "Female Patient Count"
+  ) +
+  theme_minimal(base_size = 11)
+
+```
+
+
+
+```{r}
+# Combined R Script for 2015 Census and Top Districts Analysis
+
+# ── Libraries ──────────────────────────────────────────────────────────────
+library(dplyr)
+library(readr)
+library(stringr)
+library(stringi)
+library(tools)
+library(lubridate)
+library(geosphere)
+
+# ── File Paths ─────────────────────────────────────────────────────────────
+main_file     <- "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates.csv"
+corr_file     <- "/home/vandana/gender-bias/Treatment_files/Corrected_districts_Sheet_new.csv"
+census_file   <- "/home/vandana/gender-bias/india-districts-census-2011.csv"
+out_file      <- "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates_2015.csv"
+census_2015   <- "/home/vandana/gender-bias/gemini_output/Census_2015.csv"
+centroid_file <- "/home/vandana/gender-bias/district_wise_centroids.csv"
+merged_out    <- "/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2015.csv"
+
+# ── Helper Functions ───────────────────────────────────────────────────────
+standardise_name <- function(x) {
+  x %>%
+    str_to_lower() %>%
+    str_squish() %>%
+    str_replace_all("[^[:alnum:] ]", "") %>%
+    stri_trans_general("Latin-ASCII")
+}
+
+standardise <- function(x) {
+  x %>%
+    str_to_lower() %>% str_trim() %>%
+    str_replace_all("^\\d+\\s*-\\s*", "") %>%
+    str_replace_all("[[:punct:]]", "") %>%
+    str_replace_all("\\s+", " ")
+}
+
+# ── STEP 1: Load and filter patient data ───────────────────────────────────
+df_main <- read_csv(main_file, col_types = cols()) %>%
+  mutate(earliest_order_confirmed_date = as.Date(earliest_order_confirmed_date)) %>%
+  filter(year(earliest_order_confirmed_date) == 2015, p_gender != "Unknown") %>%
+  mutate(
+    final_state    = str_trim(str_to_lower(final_state)),
+    final_district = str_trim(str_to_lower(final_district)),
+    final_district = case_when(
+      final_district == "amethi"        ~ "faizabad",
+      final_district == "maharajganj"   ~ "mahrajganj",
+      final_district == "lucknow bihar" ~ NA_character_,
+      TRUE                              ~ final_district
+    ),
+    final_state = case_when(
+      final_state == "lucknow bihar" ~ NA_character_,
+      TRUE                           ~ final_state
+    )
+  )
+
+# ── STEP 2: Load and apply district corrections ────────────────────────────
+df_corr <- read_csv(corr_file, col_types = cols()) %>%
+  filter(!is.na(Corrected_state) & !is.na(Corrected_district)) %>%
+  mutate(across(c(final_state, final_district, Corrected_state, Corrected_district), ~ str_trim(str_to_lower(.)))) %>%
+  mutate(
+    Corrected_district = case_when(
+      Corrected_district == "barabanki"       ~ "bara banki",
+      Corrected_district == "raebareli"       ~ "rae bareli",
+      Corrected_district == "kanpur"          ~ "kanpur nagar",
+      Corrected_district == "kansganj"        ~ "etah",
+      Corrected_district == "amethi"          ~ "faizabad",
+      Corrected_district == "lakhimpur kheri" ~ "kheri",
+      Corrected_district == "harthras"        ~ "aligarh",
+      TRUE                                     ~ Corrected_district
+    ),
+    Corrected_state = case_when(
+      Corrected_state == "odisha"      ~ "orissa",
+      Corrected_state == "uttaranchal" ~ "uttarakhand",
+      TRUE                             ~ Corrected_state
+    )
+  )
+
+# ── STEP 3: Apply corrections ──────────────────────────────────────────────
+df_fixed <- df_main %>%
+  left_join(df_corr, by = c("final_state", "final_district")) %>%
+  mutate(
+    final_state    = coalesce(Corrected_state, final_state),
+    final_district = coalesce(Corrected_district, final_district)
+  ) %>%
+  select(-match_flag, -Corrected_state, -Corrected_district) %>%
+  mutate(
+    final_state    = toTitleCase(final_state),
+    final_district = toTitleCase(final_district)
+  )
+
+# ── STEP 4: Match with Census 2011 ─────────────────────────────────────────
+df_census <- read_csv(census_file, col_types = cols())
+census_key <- df_census %>%
+  rename(state_raw = `State name`, district_raw = `District name`) %>%
+  mutate(
+    std_state    = standardise_name(state_raw),
+    std_district = standardise_name(district_raw)
+  ) %>%
+  distinct(std_state, std_district) %>%
+  mutate(in_census = TRUE)
+
+df_final_2011 <- df_fixed %>%
+  mutate(
+    std_state    = standardise_name(final_state),
+    std_district = standardise_name(final_district)
+  ) %>%
+  left_join(census_key, by = c("std_state", "std_district")) %>%
+  filter(!is.na(in_census)) %>%
+  select(-std_state, -std_district, -in_census)
+
+write_csv(df_final_2011, out_file)
+cat("2015 filtered, census-matched dataset written to:\n", out_file, "\n")
+
+# ── STEP 5: District-level gender counts ───────────────────────────────────
+patients_2015 <- df_final_2011 %>%
+  mutate(
+    final_district = standardise(final_district),
+    p_gender       = standardise(p_gender)
+  )
+
+district_counts <- patients_2015 %>%
+  group_by(final_district) %>%
+  summarise(
+    male_patients   = n_distinct(patient_id[p_gender == "male"]),
+    female_patients = n_distinct(patient_id[p_gender == "female"]),
+    patients        = male_patients + female_patients,
+    .groups         = "drop"
+  ) %>%
+  arrange(desc(patients)) %>%
+  mutate(
+    perc     = patients / sum(patients),
+    cum_perc = cumsum(perc)
+  )
+
+districts_80 <- district_counts %>% filter(cum_perc <= 0.80)
+
+
+# ── STEP 6: Merge with 2015 Census Data ────────────────────────────────────
+Census_2015 <- read_csv(census_2015, col_types = cols())
+colnames(Census_2015) <- colnames(Census_2015) %>%
+  str_replace_all("\\s*\\n\\s*", " ") %>%
+  str_replace_all("\\.+", "") %>%
+  str_squish()
+
+Census_2015 <- Census_2015 %>%
+  rename(district_raw = Districts) %>%
+  mutate(final_district = standardise(district_raw))
+
+merged <- districts_80 %>%
+  left_join(Census_2015 %>% select(-district_raw), by = "final_district")
+
+# ── STEP 7: Add distances to Lucknow ───────────────────────────────────────
+centroids <- read_csv(centroid_file, col_types = cols()) %>%
+  mutate(join_district = standardise(District))
+
+merged_key <- merged %>%
+  mutate(join_district = if_else(final_district == "kanpur nagar", "kanpur", final_district))
+
+lucknow_coords <- c(lon = 80.89706, lat = 26.838234)
+
+merged_dist <- merged_key %>%
+  left_join(centroids %>% select(join_district, Latitude, Longitude), by = "join_district") %>%
+  rowwise() %>%
+  mutate(
+    Distance_km = ifelse(!is.na(Latitude) & !is.na(Longitude),
+                         distHaversine(c(Longitude, Latitude), lucknow_coords) / 1000,
+                         NA_real_)
+  ) %>%
+  ungroup() %>%
+  mutate(Distance_km = round(Distance_km, 2)) %>%
+  select(-join_district)
+
+# ── STEP 8: Save final merged file ─────────────────────────────────────────
+write_csv(merged_dist, merged_out)
+cat("✅ Final merged file with census + distance saved →", merged_out, "\n")
+
+
+```
+
+
+
+Spearman correlation with composite score
+```{r UP_socio_economic_2015, fig.cap= "UP_socio_economic_2015_patient_correlation" }
+
+#plotting
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(readr)
+library(scales)
+
+# ── Load census-enhanced dataset (Census 2015) ─────────────────────────────
+districts_data <- read_csv("/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2015.csv")
+
+# ── Define variable groups ─────────────────────────────────────────────────
+health_vars <- c(
+  "No of Allopathic hospitals/dispensaries per lakh of population(including PHCs",
+  "No of beds in Allopathic hospitals/dispensaries per lakh of population(including PHCs",
+  "No of PHCs per lakh of population",
+  "No of MCH centres/sub centres per lakh of population"
+)
+
+education_vars <- c(
+  "No of School per lakh of population (JBS)",
+  "No of School per lakh of population (SBS)",
+  "Pupil teacher ratio at different educational levels (SBS)",
+  "Pupil teacher ratio at different educational levels (HSS)",
+  "Student Enrolment ratio (JBS)",
+  "Student Enrolment ratio (SBS)",
+  "Drop out rate (JBS)",
+  "Drop out rate(SBS)"
+)
+
+infra_vars <- c(
+  "Length of PWD Pucca roads per lakh population",
+  "Length of PWD Pucca roads per thousand Sq Km",
+  "Total length of pucca roads per lakh population",
+  "Total length of pucca roads per thousand Sq Km"
+)
+
+resource_vars <- c(
+  "Per capita electricity consumption(KWH)",
+  "Percentage of electricity consumption in Agriculture sector to total consumption",
+  "Percentage of electricity consumption in industry to total consumption",
+  "Percentage of domestic electricity consumption to total consumption",
+  "Percentage of electrified villages to total inhbited villages",
+  "Noof LPGconsumers per lakh of population",
+  "No of mobile connections per lakh of population (BSNL)",
+  "No of post offices per lakh of population"
+)
+
+economic_vars <- c(
+  "No of Industrial areas per lakh of population",
+  "No of small scale industries per lakh population",
+  "Per capita gross value of industrial production(Rs)",
+  "No of registered working factories per lakh of population",
+  "Credit deposit ratio",
+  "No of scheduled commercial banks per lakh of population",
+  "Credits(Rs",
+  "Deposits(Rs"
+)
+
+# ── Dropout correction (reverse sign as lower is better) ───────────────────
+districts_data <- districts_data %>%
+  mutate(
+    `Drop out rate (JBS)`  = -`Drop out rate (JBS)`,
+    `Drop out rate(SBS)`   = -`Drop out rate(SBS)`
+  )
+
+# ── Function to calculate composite + plot ─────────────────────────────────
+make_composite_plot <- function(df, vars, label, color = "#0072B2") {
+  df <- df %>%
+    mutate(composite_score = rowMeans(scale(select(., all_of(vars))), na.rm = TRUE))
+  
+  rho <- cor(df$composite_score, df$female_patients, method = "spearman", use = "complete.obs")
+  rho_label <- paste0("Spearman ρ = ", round(rho, 2))
+  
+  p <- ggplot(df, aes(x = composite_score, y = female_patients)) +
+    geom_point(size = 2, alpha = 0.7, colour = color) +
+    geom_text_repel(aes(label = final_district), size = 3, max.overlaps = Inf) +
+    annotate(
+      "text",
+      x = max(df$composite_score, na.rm = TRUE),
+      y = max(df$female_patients, na.rm = TRUE),
+      label = rho_label,
+      hjust = 1.1, vjust = 1.1,
+      size = 4, fontface = "italic"
+    ) +
+    labs(
+      title = paste(label, "Composite Score vs Female Patient Count"),
+      subtitle = "Based on census 2015 indicators",
+      x = paste(label, "Composite Score (Z‑scaled)"),
+      y = "Female Patient Count"
+    ) +
+    theme_minimal(base_size = 11)
+  
+  return(p)
+}
+
+# ── Generate and print plots ───────────────────────────────────────────────
+health_plot   <- make_composite_plot(districts_data, health_vars, "Health", "#D55E00")
+education_plot<- make_composite_plot(districts_data, education_vars, "Education", "#009E73")
+infra_plot    <- make_composite_plot(districts_data, infra_vars, "Infrastructure", "#E69F00")
+resource_plot <- make_composite_plot(districts_data, resource_vars, "Resource Access", "#56B4E9")
+economic_plot <- make_composite_plot(districts_data, economic_vars, "Economic Growth", "#CC79A7")
+
+# View plots (they will show one by one in RStudio)
+print(health_plot)
+print(education_plot)
+print(infra_plot)
+print(resource_plot)
+print(economic_plot)
+
+```
+
+
+```{r}
+#Plot without Lucknow
+# ── Libraries ──────────────────────────────────────────────────────────────
+library(dplyr)
+library(readr)
+library(stringr)
+library(geosphere)
+
+# ── File Paths ─────────────────────────────────────────────────────────────
+patient_file   <- "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates_2015.csv"
+census_file    <- "/home/vandana/gender-bias/gemini_output/Census_2015.csv"
+centroid_file  <- "/home/vandana/gender-bias/district_wise_centroids.csv"
+merged_out     <- "/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2015_without_lucknow.csv"
+
+# ── Helper: Standardize names ──────────────────────────────────────────────
+standardise <- function(x) {
+  x %>%
+    str_to_lower() %>% str_trim() %>%
+    str_replace_all("^\\d+\\s*-\\s*", "") %>%  # Remove leading "1- " or "2-"
+    str_replace_all("[[:punct:]]", "") %>%
+    str_replace_all("\\s+", " ")
+}
+
+# ── STEP 1: Load patient data & compute district-wise counts ───────────────
+patients_2015 <- read_csv(patient_file, col_types = cols()) %>%
+  mutate(
+    final_district = standardise(final_district),
+    p_gender       = standardise(p_gender)
+  )
+
+district_counts <- patients_2015 %>%
+  group_by(final_district) %>%
+  summarise(
+    male_patients   = n_distinct(patient_id[p_gender == "male"]),
+    female_patients = n_distinct(patient_id[p_gender == "female"]),
+    patients        = male_patients + female_patients,
+    .groups         = "drop"
+  ) %>%
+  arrange(desc(patients)) %>%
+  mutate(
+    perc     = patients / sum(patients),
+    cum_perc = cumsum(perc)
+  )
+
+# ── STEP 2: Keep top 80% districts ─────────────────────────────────────────
+districts_80 <- district_counts %>%
+  filter(final_district != "lucknow") %>%           # Exclude Lucknow
+  arrange(desc(patients)) %>%
+  mutate(
+    perc     = patients / sum(patients),
+    cum_perc = cumsum(perc)
+  ) %>%
+  filter(cum_perc <= 0.80)
+
+# ── STEP 3: Load Census 2015 & clean column names and district names ───────
+Census_2015 <- read_csv(census_file, col_types = cols())
+
+# Clean column names
+colnames(Census_2015) <- colnames(Census_2015) %>%
+  str_replace_all("\\s*\\n\\s*", " ") %>%  # Remove newlines
+  str_replace_all("\\.+", "") %>%          # Remove dots
+  str_squish()                             # Trim extra spaces
+
+# Clean district names
+Census_2015 <- Census_2015 %>%
+  rename(district_raw = Districts) %>%
+  mutate(final_district = standardise(district_raw))
+
+# ── STEP 4: Merge top-80 districts with census data ────────────────────────
+merged <- districts_80 %>%
+  left_join(Census_2015 %>% select(-district_raw), by = "final_district")
+
+# ── STEP 5: Add centroid coordinates & compute distance to Lucknow ────────
+centroids <- read_csv(centroid_file, col_types = cols()) %>%
+  mutate(join_district = standardise(District))
+
+merged_key <- merged %>%
+  mutate(
+    join_district = if_else(final_district == "kanpur nagar", "kanpur", final_district)
+  )
+
+lucknow_coords <- c(lon = 80.89706, lat = 26.838234)
+
+merged_dist <- merged_key %>%
+  left_join(centroids %>% select(join_district, Latitude, Longitude),
+            by = "join_district") %>%
+  rowwise() %>%
+  mutate(
+    Distance_km = ifelse(!is.na(Latitude) & !is.na(Longitude),
+                         distHaversine(c(Longitude, Latitude), lucknow_coords) / 1000,
+                         NA_real_)
+  ) %>%
+  ungroup() %>%
+  mutate(Distance_km = round(Distance_km, 2)) %>%
+  select(-join_district)
+
+# ── STEP 6: Save final merged file ─────────────────────────────────────────
+write_csv(merged_dist, merged_out)
+cat("Final merged file with census + distance saved →", merged_out, "\n")
+
+```
+
+
+```{r  UP_socio_economic_2015_without_lucknow, fig.cap= "UP_socio_economic_2015_patient_correlation_without_lucknow"}
+
+# ── Libraries ──────────────────────────────────────────────────────────────
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(readr)
+library(scales)
+
+# ── Load dataset ────────────────────────────────────────────────────────────
+districts_data <- read_csv("/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2015_without_lucknow.csv")
+
+# ── Define indicator groups ────────────────────────────────────────────────
+health_vars <- c(
+  "No of Allopathic hospitals/dispensaries per lakh of population(including PHCs",
+  "No of beds in Allopathic hospitals/dispensaries per lakh of population(including PHCs",
+  "No of PHCs per lakh of population",
+  "No of MCH centres/sub centres per lakh of population"
+)
+
+education_vars <- c(
+  "No of School per lakh of population (JBS)",
+  "No of School per lakh of population (SBS)",
+  "Pupil teacher ratio at different educational levels (SBS)",
+  "Pupil teacher ratio at different educational levels (HSS)",
+  "Student Enrolment ratio (JBS)",
+  "Student Enrolment ratio (SBS)",
+  "Drop out rate (JBS)",
+  "Drop out rate(SBS)"
+)
+
+infra_vars <- c(
+  "Length of PWD Pucca roads per lakh population",
+  "Length of PWD Pucca roads per thousand Sq Km",
+  "Total length of pucca roads per lakh population",
+  "Total length of pucca roads per thousand Sq Km"
+)
+
+resource_vars <- c(
+  "Per capita electricity consumption(KWH)",
+  "Percentage of electricity consumption in Agriculture sector to total consumption",
+  "Percentage of electricity consumption in industry to total consumption",
+  "Percentage of domestic electricity consumption to total consumption",
+  "Percentage of electrified villages to total inhbited villages",
+  "Noof LPGconsumers per lakh of population",
+  "No of mobile connections per lakh of population (BSNL)",
+  "No of post offices per lakh of population"
+)
+
+economic_vars <- c(
+  "No of Industrial areas per lakh of population",
+  "No of small scale industries per lakh population",
+  "Per capita gross value of industrial production(Rs)",
+  "No of registered working factories per lakh of population",
+  "Credit deposit ratio",
+  "No of scheduled commercial banks per lakh of population",
+  "Credits(Rs",
+  "Deposits(Rs"
+)
+
+# ── Reverse dropout scores (lower is better) ───────────────────────────────
+districts_data <- districts_data %>%
+  mutate(
+    `Drop out rate (JBS)`  = -`Drop out rate (JBS)`,
+    `Drop out rate(SBS)`   = -`Drop out rate(SBS)`
+  )
+
+# ── Plotting function ──────────────────────────────────────────────────────
+make_composite_plot <- function(df, vars, label, color = "#0072B2") {
+  df <- df %>%
+    mutate(composite_score = rowMeans(scale(select(., all_of(vars))), na.rm = TRUE))
+  
+  rho <- cor(df$composite_score, df$female_patients, method = "pearson", use = "complete.obs")
+  rho_label <- paste0("Pearson ρ = ", round(rho, 2))
+  
+  p <- ggplot(df, aes(x = composite_score, y = female_patients)) +
+    geom_point(size = 1.8, alpha = 0.7, colour = color) +
+    geom_text_repel(aes(label = final_district), size = 3, max.overlaps = Inf) +
+    annotate(
+      "text",
+      x = min(df$composite_score, na.rm = TRUE),
+      y = max(df$female_patients, na.rm = TRUE),
+      label = rho_label,
+      hjust = -1.1, vjust = 1,
+      size = 4, fontface = "italic"
+    ) +
+    labs(
+      title = paste(label, "Composite Score vs Female Patient Count"),
+      subtitle = "Based on census 2015 indicators",
+      x = paste(label, "Composite Score (Z‑scaled)"),
+      y = "Female Patient Count"
+    ) +
+    theme_minimal(base_size = 11)
+  
+  return(p)
+}
+
+# ── Generate plots ─────────────────────────────────────────────────────────
+health_plot_without_lucknow    <- make_composite_plot(districts_data, health_vars, "Health", "#D55E00")
+education_plot_without_lucknow <- make_composite_plot(districts_data, education_vars, "Education", "#009E73")
+infra_plot_without_lucknow     <- make_composite_plot(districts_data, infra_vars, "Infrastructure", "#E69F00")
+resource_plot_without_lucknow  <- make_composite_plot(districts_data, resource_vars, "Resource Access", "#56B4E9")
+economic_plot_without_lucknow  <- make_composite_plot(districts_data, economic_vars, "Economic Growth", "#CC79A7")
+
+# ── Print updated plots ────────────────────────────────────────────────────
+print(health_plot_without_lucknow)
+print(education_plot_without_lucknow)
+print(infra_plot_without_lucknow)
+print(resource_plot_without_lucknow)
+print(economic_plot_without_lucknow)
+
+```
+
+
+For 2016
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(stringi)
+library(tools)          # toTitleCase()
+library(lubridate)      # year()
+
+# ── File paths ──────────────────────────────────────────────────────────────
+main_file   <- "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates.csv"
+corr_file   <- "/home/vandana/gender-bias/Treatment_files/Corrected_districts_Sheet_new.csv"
+census_file <- "/home/vandana/gender-bias/india-districts-census-2011.csv"
+out_file    <- "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates_2016.csv"
+
+# ── Helper: standardise names (lower‑case, trim, rm. punctuation, de‑accent) ─
+standardise_name <- function(x) {
+  x %>%
+    str_to_lower() %>%
+    str_squish() %>%
+    str_replace_all("[^[:alnum:] ]", "") %>%
+    stri_trans_general("Latin-ASCII")
+}
+
+# 1. READ INPUT FILES ────────────────────────────────────────────────────────
+df_main <- read_csv(main_file, col_types = cols()) %>%
+  mutate(earliest_order_confirmed_date = as.Date(earliest_order_confirmed_date))
+
+df_corr <- read_csv(corr_file, col_types = cols(
+  final_state        = col_character(),
+  final_district     = col_character(),
+  match_flag         = col_character(),
+  Corrected_state    = col_character(),
+  Corrected_district = col_character()
+)) %>%
+  filter(!is.na(Corrected_state) & !is.na(Corrected_district))
+
+df_census <- read_csv(census_file, col_types = cols())
+
+# 2. KEEP ONLY 2011 DATA & VALID GENDERS ─────────────────────────────────────
+df_main <- df_main %>%
+  filter(year(earliest_order_confirmed_date) == 2016,
+         p_gender != "Unknown") %>%
+  mutate(
+    final_state    = str_trim(str_to_lower(final_state)),
+    final_district = str_trim(str_to_lower(final_district))
+  ) %>%
+  mutate(                       # hard‑coded fixes (unchanged from your script)
+    final_district = case_when(
+      final_district == "amethi"        ~ "faizabad",
+      final_district == "maharajganj"   ~ "mahrajganj",
+      final_district == "lucknow bihar" ~ NA_character_,
+      TRUE                              ~ final_district
+    ),
+    final_state = case_when(
+      final_state == "lucknow bihar"    ~ NA_character_,
+      TRUE                              ~ final_state
+    )
+  )
+
+# 3. CLEAN CORRECTION SHEET (same as before) ────────────────────────────────
+df_corr <- df_corr %>%
+  mutate(across(c(final_state, final_district,
+                  Corrected_state, Corrected_district),
+                ~ str_trim(str_to_lower(.x)))) %>%
+  mutate(
+    Corrected_district = case_when(
+      Corrected_district == "barabanki"       ~ "bara banki",
+      Corrected_district == "raebareli"       ~ "rae bareli",
+      Corrected_district == "kanpur"          ~ "kanpur nagar",
+      Corrected_district == "kansganj"        ~ "etah",
+      Corrected_district == "amethi"          ~ "faizabad",
+      Corrected_district == "lakhimpur kheri" ~ "kheri",
+      Corrected_district == "harthras"        ~ "aligarh",
+      TRUE                                    ~ Corrected_district
+    ),
+    Corrected_state = case_when(
+      Corrected_state == "odisha"       ~ "orissa",
+      Corrected_state == "uttaranchal"  ~ "uttarakhand",
+      TRUE                              ~ Corrected_state
+    )
+  )
+
+# 4. APPLY CORRECTIONS ──────────────────────────────────────────────────────
+df_fixed <- df_main %>%
+  left_join(df_corr, by = c("final_state", "final_district")) %>%
+  mutate(
+    final_state    = coalesce(Corrected_state,    final_state),
+    final_district = coalesce(Corrected_district, final_district)
+  ) %>%
+  select(-match_flag, -Corrected_state, -Corrected_district) %>%
+  mutate(
+    final_state    = toTitleCase(final_state),
+    final_district = toTitleCase(final_district)
+  )
+
+# 5. BUILD CLEAN CENSUS LOOK‑UP TABLE ────────────────────────────────────────
+census_key <- df_census %>%
+  rename(state_raw = `State name`,
+         district_raw = `District name`) %>%
+  mutate(
+    std_state    = standardise_name(state_raw),
+    std_district = standardise_name(district_raw)
+  ) %>%
+  distinct(std_state, std_district) %>%
+  mutate(in_census = TRUE)
+
+# 6. DROP ROWS WHOSE DISTRICTS ARE NOT IN 2011 CENSUS ───────────────────────
+df_final_2016 <- df_fixed %>%
+  mutate(
+    std_state    = standardise_name(final_state),
+    std_district = standardise_name(final_district)
+  ) %>%
+  left_join(census_key,
+            by = c("std_state", "std_district")) %>%
+  filter(!is.na(in_census)) %>%
+  select(-std_state, -std_district, -in_census)
+
+# 7. SAVE RESULT ────────────────────────────────────────────────────────────
+write_csv(df_final_2016, out_file)
+cat("✅ 2011‑filtered, census‑matched dataset written to:\n", out_file, "\n")
+
+```
+
+
+```{r}
+
+# ── Libraries ──────────────────────────────────────────────────────────────
+library(dplyr)
+library(readr)
+library(stringr)
+library(geosphere)
+
+# ── File Paths ─────────────────────────────────────────────────────────────
+patient_file   <- "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates_2016.csv"
+census_file    <- "/home/vandana/gender-bias/gemini_output/Census_2016.csv"
+centroid_file  <- "/home/vandana/gender-bias/district_wise_centroids.csv"
+district_out   <- "/home/vandana/gender-bias/Treatment_files/districts_top_80_percent_2016.csv"
+merged_out     <- "/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2016.csv"
+
+# ── Helper: Standardize names ──────────────────────────────────────────────
+standardise <- function(x) {
+  x %>%
+    str_to_lower() %>% str_trim() %>%
+    str_replace_all("^\\d+\\s*-\\s*", "") %>%  # Remove leading "1- " or "2-"
+    str_replace_all("[[:punct:]]", "") %>%
+    str_replace_all("\\s+", " ")
+}
+
+# ── STEP 1: Load patient data & compute district-wise counts ───────────────
+patients_2016 <- read_csv(patient_file, col_types = cols()) %>%
+  mutate(
+    final_district = standardise(final_district),
+    final_state    = standardise(final_state),
+    p_gender       = standardise(p_gender)
+  ) %>%
+  filter(final_state == "uttar pradesh")  # ✅ KEEP ONLY UTTAR PRADESH
+
+district_counts <- patients_2016 %>%
+  group_by(final_district) %>%
+  summarise(
+    male_patients   = n_distinct(patient_id[p_gender == "male"]),
+    female_patients = n_distinct(patient_id[p_gender == "female"]),
+    patients        = male_patients + female_patients,
+    .groups         = "drop"
+  ) %>%
+  arrange(desc(patients)) %>%
+  mutate(
+    perc     = patients / sum(patients),
+    cum_perc = cumsum(perc)
+  )
+
+# ── STEP 2: Keep top 80% districts ─────────────────────────────────────────
+districts_80 <- district_counts %>% filter(cum_perc <= 0.80)
+
+# ── STEP 3: Load Census 2016 & clean column names and district names ───────
+Census_2016 <- read_csv(census_file, col_types = cols())
+
+colnames(Census_2016) <- colnames(Census_2016) %>%
+  str_replace_all("\\s*\\n\\s*", " ") %>%
+  str_replace_all("\\.+", "") %>%
+  str_squish()
+
+Census_2016 <- Census_2016 %>%
+  rename(district_raw = Districts) %>%
+  mutate(final_district = standardise(district_raw))
+
+# ── STEP 4: Merge top-80 districts with census data ────────────────────────
+merged <- districts_80 %>%
+  left_join(Census_2016 %>% select(-district_raw), by = "final_district")
+
+# ── STEP 5: Add centroid coordinates & compute distance to Lucknow ────────
+centroids <- read_csv(centroid_file, col_types = cols()) %>%
+  mutate(join_district = standardise(District))
+
+merged_key <- merged %>%
+  mutate(
+    join_district = if_else(final_district == "kanpur nagar", "kanpur", final_district)
+  )
+
+lucknow_coords <- c(lon = 80.89706, lat = 26.838234)
+
+merged_dist <- merged_key %>%
+  left_join(centroids %>% select(join_district, Latitude, Longitude),
+            by = "join_district") %>%
+  rowwise() %>%
+  mutate(
+    Distance_km = ifelse(!is.na(Latitude) & !is.na(Longitude),
+                         distHaversine(c(Longitude, Latitude), lucknow_coords) / 1000,
+                         NA_real_)
+  ) %>%
+  ungroup() %>%
+  mutate(Distance_km = round(Distance_km, 2)) %>%
+  select(-join_district)
+
+# ── STEP 6: Save final merged file ─────────────────────────────────────────
+write_csv(merged_dist, merged_out)
+cat("✅ Final merged file with census + distance saved →", merged_out, "\n")
+
+```
+
+```{r  UP_socio_economic_2016, fig.cap= "UP_socio_economic_2016_patient_correlation"}
+#plotting
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(readr)
+library(scales)
+
+# ── Load census-enhanced dataset (Census 2015) ─────────────────────────────
+districts_data <- read_csv("/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2016.csv")
+
+# ── Define variable groups ─────────────────────────────────────────────────
+health_vars <- c(
+  "No of Allopathic hospitals/dispensaries per lakh of population(including PHCs",
+  "No of beds in Allopathic hospitals/dispensaries per lakh of population(including PHCs",
+  "No of PHCs per lakh of population",
+  "No of MCH centres/sub centres per lakh of population"
+)
+
+education_vars <- c(
+  "No of School per lakh of population (JBS)",
+  "No of School per lakh of population (SBS)",
+  "Pupil teacher ratio at different educational levels (SBS)",
+  "Pupil teacher ratio at different educational levels (HSS)",
+  "Student Enrolment ratio (JBS)",
+  "Student Enrolment ratio (SBS)",
+  "Drop out rate (JBS)",
+  "Drop out rate(SBS)"
+)
+
+infra_vars <- c(
+  "Length of PWD Pucca roads per lakh population",
+  "Length of PWD Pucca roads per thousand Sq Km",
+  "Total length of pucca roads per lakh population",
+  "Total length of pucca roads per thousand Sq Km"
+)
+
+resource_vars <- c(
+  "Per capita electricity consumption(KWH)",
+  "Percentage of electricity consumption in Agriculture sector to total consumption",
+  "Percentage of electricity consumption in industry to total consumption",
+  "Percentage of domestic electricity consumption to total consumption",
+  "Percentage of electrified villages to total inhbited villages",
+  "Noof LPGconsumers per lakh of population",
+  "No of mobile connections per lakh of population (BSNL)",
+  "No of post offices per lakh of population"
+)
+
+economic_vars <- c(
+  "No of Industrial areas per lakh of population",
+  "No of small scale industries per lakh population",
+  "Per capita gross value of industrial production(Rs)",
+  "No of registered working factories per lakh of population",
+  "Credit deposit ratio",
+  "No of scheduled commercial banks per lakh of population",
+  "Credits(Rs",
+  "Deposits(Rs"
+)
+
+# ── Dropout correction (reverse sign as lower is better) ───────────────────
+districts_data <- districts_data %>%
+  mutate(
+    `Drop out rate (JBS)`  = -`Drop out rate (JBS)`,
+    `Drop out rate(SBS)`   = -`Drop out rate(SBS)`
+  )
+
+# ── Function to calculate composite + plot ─────────────────────────────────
+make_composite_plot <- function(df, vars, label, color = "#0072B2") {
+  df <- df %>%
+    mutate(composite_score = rowMeans(scale(select(., all_of(vars))), na.rm = TRUE))
+  
+  rho <- cor(df$composite_score, df$female_patients, method = "spearman", use = "complete.obs")
+  rho_label <- paste0("Spearman ρ = ", round(rho, 2))
+  
+  p <- ggplot(df, aes(x = composite_score, y = female_patients)) +
+    geom_point(size = 2, alpha = 0.7, colour = color) +
+    geom_text_repel(aes(label = final_district), size = 3, max.overlaps = Inf) +
+    annotate(
+      "text",
+      x = max(df$composite_score, na.rm = TRUE),
+      y = max(df$female_patients, na.rm = TRUE),
+      label = rho_label,
+      hjust = 1.5, vjust = 1.1,
+      size = 4, fontface = "italic"
+    ) +
+    labs(
+      title = paste(label, "Composite Score vs Female Patient Count"),
+      subtitle = "Based on census 2015 indicators",
+      x = paste(label, "Composite Score (Z‑scaled)"),
+      y = "Female Patient Count"
+    ) +
+    theme_minimal(base_size = 11)
+  
+  return(p)
+}
+
+# ── Generate and print plots ───────────────────────────────────────────────
+health_plot   <- make_composite_plot(districts_data, health_vars, "Health", "#D55E00")
+education_plot<- make_composite_plot(districts_data, education_vars, "Education", "#009E73")
+infra_plot    <- make_composite_plot(districts_data, infra_vars, "Infrastructure", "#E69F00")
+resource_plot <- make_composite_plot(districts_data, resource_vars, "Resource Access", "#56B4E9")
+economic_plot <- make_composite_plot(districts_data, economic_vars, "Economic Growth", "#CC79A7")
+
+# View plots (they will show one by one in RStudio)
+print(health_plot)
+print(education_plot)
+print(infra_plot)
+print(resource_plot)
+print(economic_plot)
+```
+
+
+```{r}
+
+#Plot without Lucknow
+# ── Libraries ──────────────────────────────────────────────────────────────
+library(dplyr)
+library(readr)
+library(stringr)
+library(geosphere)
+
+# ── File Paths ─────────────────────────────────────────────────────────────
+patient_file   <- "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates_2016.csv"
+census_file    <- "/home/vandana/gender-bias/gemini_output/Census_2016.csv"
+centroid_file  <- "/home/vandana/gender-bias/district_wise_centroids.csv"
+merged_out     <- "/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2016_without_lucknow.csv"
+
+# ── Helper: Standardize names ──────────────────────────────────────────────
+standardise <- function(x) {
+  x %>%
+    str_to_lower() %>% str_trim() %>%
+    str_replace_all("^\\d+\\s*-\\s*", "") %>%  # Remove leading "1- " or "2-"
+    str_replace_all("[[:punct:]]", "") %>%
+    str_replace_all("\\s+", " ")
+}
+
+# ── STEP 1: Load patient data & compute district-wise counts ───────────────
+patients_2016 <- read_csv(patient_file, col_types = cols()) %>%
+  mutate(
+    final_district = standardise(final_district),
+    p_gender       = standardise(p_gender)
+  )
+
+district_counts <- patients_2016 %>%
+  group_by(final_district) %>%
+  summarise(
+    male_patients   = n_distinct(patient_id[p_gender == "male"]),
+    female_patients = n_distinct(patient_id[p_gender == "female"]),
+    patients        = male_patients + female_patients,
+    .groups         = "drop"
+  ) %>%
+  arrange(desc(patients)) %>%
+  mutate(
+    perc     = patients / sum(patients),
+    cum_perc = cumsum(perc)
+  )
+
+# ── STEP 2: Keep top 80% districts ─────────────────────────────────────────
+districts_80 <- district_counts %>%
+  filter(final_district != "lucknow") %>%           # Exclude Lucknow
+  arrange(desc(patients)) %>%
+  mutate(
+    perc     = patients / sum(patients),
+    cum_perc = cumsum(perc)
+  ) %>%
+  filter(cum_perc <= 0.80)
+
+# ── STEP 3: Load Census 2015 & clean column names and district names ───────
+Census_2016 <- read_csv(census_file, col_types = cols())
+
+# Clean column names
+colnames(Census_2016) <- colnames(Census_2016) %>%
+  str_replace_all("\\s*\\n\\s*", " ") %>%  # Remove newlines
+  str_replace_all("\\.+", "") %>%          # Remove dots
+  str_squish()                             # Trim extra spaces
+
+# Clean district names
+Census_2016 <- Census_2016 %>%
+  rename(district_raw = Districts) %>%
+  mutate(final_district = standardise(district_raw))
+
+# ── STEP 4: Merge top-80 districts with census data ────────────────────────
+merged <- districts_80 %>%
+  left_join(Census_2016 %>% select(-district_raw), by = "final_district")
+
+# ── STEP 5: Add centroid coordinates & compute distance to Lucknow ────────
+centroids <- read_csv(centroid_file, col_types = cols()) %>%
+  mutate(join_district = standardise(District))
+
+merged_key <- merged %>%
+  mutate(
+    join_district = if_else(final_district == "kanpur nagar", "kanpur", final_district)
+  )
+
+lucknow_coords <- c(lon = 80.89706, lat = 26.838234)
+
+merged_dist <- merged_key %>%
+  left_join(centroids %>% select(join_district, Latitude, Longitude),
+            by = "join_district") %>%
+  rowwise() %>%
+  mutate(
+    Distance_km = ifelse(!is.na(Latitude) & !is.na(Longitude),
+                         distHaversine(c(Longitude, Latitude), lucknow_coords) / 1000,
+                         NA_real_)
+  ) %>%
+  ungroup() %>%
+  mutate(Distance_km = round(Distance_km, 2)) %>%
+  select(-join_district)
+
+# ── STEP 6: Save final merged file ─────────────────────────────────────────
+write_csv(merged_dist, merged_out)
+cat("✅ Final merged file with census + distance saved →", merged_out, "\n")
+
+
+```
+
+
+```{r  UP_socio_economic_2015_without_lucknow_correlation, fig.cap= "UP_socio_economic_2015_patient_correlation_without_lucknow"}
+# ── Libraries ──────────────────────────────────────────────────────────────
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(readr)
+library(scales)
+
+# ── Load 2016 census-enhanced dataset (without Lucknow) ────────────────────
+districts_data <- read_csv("/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2016_without_lucknow.csv")
+
+# ── Define variable groups ─────────────────────────────────────────────────
+health_vars <- c(
+  "No of Allopathic hospitals/dispensaries per lakh of population(including PHCs",
+  "No of beds in Allopathic hospitals/dispensaries per lakh of population(including PHCs",
+  "No of PHCs per lakh of population",
+  "No of MCH centres/sub centres per lakh of population"
+)
+
+education_vars <- c(
+  "No of School per lakh of population (JBS)",
+  "No of School per lakh of population (SBS)",
+  "Pupil teacher ratio at different educational levels (SBS)",
+  "Pupil teacher ratio at different educational levels (HSS)",
+  "Student Enrolment ratio (JBS)",
+  "Student Enrolment ratio (SBS)",
+  "Drop out rate (JBS)",
+  "Drop out rate(SBS)"
+)
+
+infra_vars <- c(
+  "Length of PWD Pucca roads per lakh population",
+  "Length of PWD Pucca roads per thousand Sq Km",
+  "Total length of pucca roads per lakh population",
+  "Total length of pucca roads per thousand Sq Km"
+)
+
+resource_vars <- c(
+  "Per capita electricity consumption(KWH)",
+  "Percentage of electricity consumption in Agriculture sector to total consumption",
+  "Percentage of electricity consumption in industry to total consumption",
+  "Percentage of domestic electricity consumption to total consumption",
+  "Percentage of electrified villages to total inhbited villages",
+  "Noof LPGconsumers per lakh of population",
+  "No of mobile connections per lakh of population (BSNL)",
+  "No of post offices per lakh of population"
+)
+
+economic_vars <- c(
+  "No of Industrial areas per lakh of population",
+  "No of small scale industries per lakh population",
+  "Per capita gross value of industrial production(Rs)",
+  "No of registered working factories per lakh of population",
+  "Credit deposit ratio",
+  "No of scheduled commercial banks per lakh of population",
+  "Credits(Rs",
+  "Deposits(Rs"
+)
+
+# ── Dropout correction (reverse sign as lower is better) ───────────────────
+districts_data <- districts_data %>%
+  mutate(
+    `Drop out rate (JBS)`  = -`Drop out rate (JBS)`,
+    `Drop out rate(SBS)`   = -`Drop out rate(SBS)`
+  )
+
+# ── Function to calculate composite score and plot ─────────────────────────
+make_composite_plot <- function(df, vars, label, color = "#0072B2") {
+  df <- df %>%
+    mutate(composite_score = rowMeans(scale(select(., all_of(vars))), na.rm = TRUE))
+  
+  rho <- cor(df$composite_score, df$female_patients, method = "pearson", use = "complete.obs")
+  rho_label <- paste0("Pearson ρ = ", round(rho, 2))
+  
+  p <- ggplot(df, aes(x = composite_score, y = female_patients)) +
+    geom_point(size = 2, alpha = 0.7, colour = color) +
+    geom_text_repel(aes(label = final_district), size = 3, max.overlaps = Inf) +
+    annotate(
+      "text",
+      x = max(df$composite_score, na.rm = TRUE),
+      y = max(df$female_patients, na.rm = TRUE),
+      label = rho_label,
+      hjust = 1.1, vjust = 1.1,
+      size = 4, fontface = "italic"
+    ) +
+    labs(
+      title = paste(label, "Composite Score vs Female Patient Count"),
+      subtitle = "Based on census 2016 indicators",
+      x = paste(label, "Composite Score (Z‑scaled)"),
+      y = "Female Patient Count"
+    ) +
+    theme_minimal(base_size = 11)
+  
+  return(p)
+}
+
+# ── Generate and print plots (without Lucknow) ─────────────────────────────
+health_plot_without_lucknow    <- make_composite_plot(districts_data, health_vars, "Health", "#D55E00")
+education_plot_without_lucknow <- make_composite_plot(districts_data, education_vars, "Education", "#009E73")
+infra_plot_without_lucknow     <- make_composite_plot(districts_data, infra_vars, "Infrastructure", "#E69F00")
+resource_plot_without_lucknow  <- make_composite_plot(districts_data, resource_vars, "Resource Access", "#56B4E9")
+economic_plot_without_lucknow  <- make_composite_plot(districts_data, economic_vars, "Economic Growth", "#CC79A7")
+
+# ── Print Plots ────────────────────────────────────────────────────────────
+print(health_plot_without_lucknow)
+print(education_plot_without_lucknow)
+print(infra_plot_without_lucknow)
+print(resource_plot_without_lucknow)
+print(economic_plot_without_lucknow)
+
+```
+
+
+
+
+```{r  UP_socio_economic_2015_without_composite_score_file}
+
+#Plot without Lucknow
+# ── Libraries ──────────────────────────────────────────────────────────────
+library(dplyr)
+library(readr)
+library(stringr)
+library(geosphere)
+
+# ── File Paths ─────────────────────────────────────────────────────────────
+patient_file   <- "/home/vandana/gender-bias/Treatment_files/p_id_services_with_location_dates_2015.csv"
+census_file    <- "/home/vandana/gender-bias/gemini_output/Census_2015.csv"
+centroid_file  <- "/home/vandana/gender-bias/district_wise_centroids.csv"
+merged_out     <- "/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2015_without_lucknow.csv"
+
+# ── Helper: Standardize names ──────────────────────────────────────────────
+standardise <- function(x) {
+  x %>%
+    str_to_lower() %>% str_trim() %>%
+    str_replace_all("^\\d+\\s*-\\s*", "") %>%  # Remove leading "1- " or "2-"
+    str_replace_all("[[:punct:]]", "") %>%
+    str_replace_all("\\s+", " ")
+}
+
+# ── STEP 1: Load patient data & compute district-wise counts ───────────────
+patients_2015 <- read_csv(patient_file, col_types = cols()) %>%
+  mutate(
+    final_district = standardise(final_district),
+    p_gender       = standardise(p_gender)
+  )
+
+district_counts <- patients_2015 %>%
+  group_by(final_district) %>%
+  summarise(
+    male_patients   = n_distinct(patient_id[p_gender == "male"]),
+    female_patients = n_distinct(patient_id[p_gender == "female"]),
+    patients        = male_patients + female_patients,
+    .groups         = "drop"
+  ) %>%
+  arrange(desc(patients)) %>%
+  mutate(
+    perc     = patients / sum(patients),
+    cum_perc = cumsum(perc)
+  )
+
+# ── STEP 2: Keep top 80% districts ─────────────────────────────────────────
+districts_80 <- district_counts %>%
+  filter(final_district != "lucknow") %>%           # Exclude Lucknow
+  arrange(desc(patients)) %>%
+  mutate(
+    perc     = patients / sum(patients),
+    cum_perc = cumsum(perc)
+  ) %>%
+  filter(cum_perc <= 0.80)
+
+# ── STEP 3: Load Census 2015 & clean column names and district names ───────
+Census_2015 <- read_csv(census_file, col_types = cols())
+
+# Clean column names
+colnames(Census_2015) <- colnames(Census_2015) %>%
+  str_replace_all("\\s*\\n\\s*", " ") %>%  # Remove newlines
+  str_replace_all("\\.+", "") %>%          # Remove dots
+  str_squish()                             # Trim extra spaces
+
+# Clean district names
+Census_2015 <- Census_2015 %>%
+  rename(district_raw = Districts) %>%
+  mutate(final_district = standardise(district_raw))
+
+# ── STEP 4: Merge top-80 districts with census data ────────────────────────
+merged <- districts_80 %>%
+  left_join(Census_2015 %>% select(-district_raw), by = "final_district")
+
+# ── STEP 5: Add centroid coordinates & compute distance to Lucknow ────────
+centroids <- read_csv(centroid_file, col_types = cols()) %>%
+  mutate(join_district = standardise(District))
+
+merged_key <- merged %>%
+  mutate(
+    join_district = if_else(final_district == "kanpur nagar", "kanpur", final_district)
+  )
+
+lucknow_coords <- c(lon = 80.89706, lat = 26.838234)
+
+merged_dist <- merged_key %>%
+  left_join(centroids %>% select(join_district, Latitude, Longitude),
+            by = "join_district") %>%
+  rowwise() %>%
+  mutate(
+    Distance_km = ifelse(!is.na(Latitude) & !is.na(Longitude),
+                         distHaversine(c(Longitude, Latitude), lucknow_coords) / 1000,
+                         NA_real_)
+  ) %>%
+  ungroup() %>%
+  mutate(Distance_km = round(Distance_km, 2)) %>%
+  select(-join_district)
+
+# ── STEP 6: Save final merged file ─────────────────────────────────────────
+write_csv(merged_dist, merged_out)
+cat("✅ Final merged file with census + distance saved →", merged_out, "\n")
+
+
+```
+
+```{r UP_socio_economic_2015_without_composite_score, fig.cap= "UP_socio_economic_2015_patient_correlation_without_composite_score"}
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(ggrepel)
+library(rlang)  # for sym()
+
+# Step 1: Load data
+districts <- read_csv("/home/vandana/gender-bias/Treatment_files/districts_80_with_census_2015_without_lucknow.csv")
+
+# Step 2: Add raw female-to-male ratio (no log)
+districts <- districts %>%
+  mutate(female_to_male_ratio = female_patients / male_patients)
+
+# Step 3: Define predictor variables
+predictor_vars <- c(
+  "No of Allopathic hospitals/dispensaries per lakh of population(including PHCs",
+  "No of beds in Allopathic hospitals/dispensaries per lakh of population(including PHCs",
+  "No of PHCs per lakh of population",
+  "No of MCH centres/sub centres per lakh of population",
+  "No of School per lakh of population (JBS)",
+  "No of School per lakh of population (SBS)",
+  "Drop out rate (JBS)",
+  "Drop out rate(SBS)",
+  "Per capita electricity consumption(KWH)",
+  "Noof LPGconsumers per lakh of population",
+  "No of mobile connections per lakh of population (BSNL)",
+  "No of scheduled commercial banks per lakh of population",
+  "No of registered working factories per lakh of population"
+)
+
+# Step 4: Calculate pearson correlations
+cor_values <- lapply(predictor_vars, function(var) {
+  cor_val <- cor(districts$female_to_male_ratio, districts[[var]], method = "pearson", use = "complete.obs")
+  data.frame(Predictor = var, Correlation = round(cor_val, 2))
+}) %>% bind_rows()
+
+# Step 5: Generate individual plots
+for (var in predictor_vars) {
+  correlation <- cor_values %>% filter(Predictor == var) %>% pull(Correlation)
+  
+  p <- ggplot(districts, aes(x = !!sym(var), y = female_to_male_ratio, label = final_district)) +
+    geom_point(color = "darkblue", alpha = 0.6) +
+    geom_text_repel(size = 2.5, max.overlaps = 20) +
+    labs(
+      title = paste("Female-to-Male Patient Ratio vs", var),
+      subtitle = paste("pearson r =", correlation),
+      x = var,
+      y = "Female / Male Patient Ratio"
+    ) +
+    theme_minimal(base_size = 11)
+  
+  print(p)
+}
+
+
+```
